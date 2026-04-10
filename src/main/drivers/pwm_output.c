@@ -33,6 +33,7 @@
 #include "drivers/io.h"
 #include "drivers/dshot_bidir.h"
 #include "drivers/dshot_bidir_utils.h"
+#include "drivers/dshot_bitbang_runtime.h"
 #include "drivers/timer.h"
 #include "drivers/pwm_mapping.h"
 #include "drivers/pwm_output.h"
@@ -117,6 +118,7 @@ static uint8_t allocatedOutputPortCount = 0;
 
 static bool pwmMotorsEnabled = true;
 static bool dshotBidirModeActive = false;
+static bool dshotBitbangModeActive = false;
 static uint8_t dshotBidirConfiguredMotorCount = 0;
 
 #ifdef USE_DSHOT
@@ -411,6 +413,11 @@ bool isMotorProtocolDigital(void)
 bool isDshotBidirModeActive(void)
 {
 #ifdef USE_DSHOT_BIDIR
+    if (dshotBitbangModeActive) {
+        return dshotBidirModeActive && dshotBitbangRuntimeIsReady();
+    }
+#endif
+#ifdef USE_DSHOT_BIDIR
     return dshotBidirIsRuntimeActive(dshotBidirModeActive, dshotBidirConfiguredMotorCount, getMotorCount(), dshotBidirIsReady());
 #else
     return false;
@@ -503,9 +510,13 @@ void pwmCompleteMotorUpdate(void) {
 
 #ifdef USE_DSHOT_BIDIR
     const bool dshotBidirActive = isDshotBidirModeActive();
-    const bool dshotBidirUsesBurst = dshotBidirActive && dshotBidirUsesBurstOutput();
+    const bool dshotBidirUsesBurst = dshotBidirActive && !dshotBitbangModeActive && dshotBidirUsesBurstOutput();
 
-    if (dshotBidirActive && !dshotBidirUpdate()) {
+    if (dshotBitbangModeActive) {
+        if (!dshotBitbangRuntimeUpdate()) {
+            return;
+        }
+    } else if (dshotBidirActive && !dshotBidirUpdate()) {
         return;
     }
 #else
@@ -527,6 +538,18 @@ void pwmCompleteMotorUpdate(void) {
     if (isMotorProtocolDshot()) {
 
         if (!executeDShotCommands()) {
+            return;
+        }
+
+        if (dshotBitbangModeActive) {
+            dshotBitbangRuntimeBeginFrame();
+            for (int index = 0; index < motorCount; index++) {
+                const bool requestTelemetry = dshotBidirActive || motors[index].requestTelemetry;
+                dshotBitbangRuntimeSetMotorValue(index, motors[index].value, requestTelemetry);
+                motors[index].requestTelemetry = false;
+            }
+
+            dshotBitbangRuntimeStartFrame();
             return;
         }
 
@@ -612,6 +635,7 @@ void pwmMotorPreconfigure(void)
         initMotorProtocol <= PWM_TYPE_DSHOT600 &&
         getMotorCount() > 0 &&
         getMotorCount() <= 4;
+    dshotBitbangModeActive = false;
     dshotBidirConfiguredMotorCount = 0;
 
     if (dshotBidirModeActive && initMotorProtocol == PWM_TYPE_DSHOT600) {
@@ -619,6 +643,10 @@ void pwmMotorPreconfigure(void)
     }
 
     if (dshotBidirModeActive) {
+        dshotBitbangModeActive = dshotBitbangRuntimeInit(getDshotHz(initMotorProtocol));
+    }
+
+    if (dshotBidirModeActive && !dshotBitbangModeActive) {
         dshotBidirInit(getDshotHz(initMotorProtocol));
     }
 #endif
@@ -688,6 +716,10 @@ bool pwmMotorConfig(const timerHardware_t *timerHardware, uint8_t motorIndex, bo
         if (motorIndex >= 4 || timerHardware->tim != TIM4) {
             return false;
         }
+
+        if (dshotBitbangModeActive) {
+            return dshotBitbangRuntimeConfigureMotor(timerHardware, motorIndex, enableOutput);
+        }
     }
 #endif
 
@@ -742,6 +774,10 @@ bool pwmMotorConfig(const timerHardware_t *timerHardware, uint8_t motorIndex, bo
 // Helper function for ESC passthrough
 ioTag_t pwmGetMotorPinTag(int motorIndex)
 {
+    if (dshotBitbangModeActive) {
+        return dshotBitbangRuntimeGetMotorPinTag(motorIndex);
+    }
+
     if (motors[motorIndex].pwmPort) {
         return motors[motorIndex].pwmPort->tch->timHw->tag;
     }

@@ -219,6 +219,10 @@ main_sources(COMMON_SRC
     drivers/dshot_bidir_utils.h
     drivers/dshot_bitbang.c
     drivers/dshot_bitbang.h
+    drivers/dshot_bitbang_decode.c
+    drivers/dshot_bitbang_decode.h
+    drivers/dshot_bitbang_runtime.c
+    drivers/dshot_bitbang_runtime.h
     drivers/pitotmeter/pitotmeter_adc.c
     drivers/pitotmeter/pitotmeter_adc.h
     drivers/pitotmeter/pitotmeter_ms4525.c
