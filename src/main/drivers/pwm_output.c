@@ -32,6 +32,7 @@
 
 #include "drivers/io.h"
 #include "drivers/dshot_bidir.h"
+#include "drivers/dshot_bidir_utils.h"
 #include "drivers/timer.h"
 #include "drivers/pwm_mapping.h"
 #include "drivers/pwm_output.h"
@@ -151,9 +152,7 @@ static pwmOutputPort_t *pwmOutAllocatePort(void)
     }
 
     pwmOutputPort_t *p = &pwmOutputPorts[allocatedOutputPortCount++];
-
-    p->tch = NULL;
-    p->configured = false;
+    memset(p, 0, sizeof(*p));
 
     return p;
 }
@@ -293,17 +292,36 @@ static pwmOutputPort_t * motorConfigDshot(const timerHardware_t * timerHardware,
 
     // Configure timer DMA
 #ifdef USE_DSHOT_DMAR
-    //uint8_t timerIndex = lookupTimerIndex(timerHardware->tim);
-    uint8_t burstDmaTimerIndex = getBurstDmaTimerIndex(timerHardware->tim);
-    if (burstDmaTimerIndex >= MAX_DMA_TIMERS) {
-        return NULL;
+    // STM32F4 TIM4 CH4 has no per-channel DMA stream, so quad layouts on TIM4
+    // must stay on burst output to drive all four motor channels together.
+    const bool useChannelDmaForBidir = dshotBidirModeActive && timerHardware->tim == TIM4 && getMotorCount() <= 3;
+    burstDmaTimer_t *burstDmaTimer = NULL;
+    dmaTag_t burstDmaTagOverride = DMA_NONE;
+    uint16_t burstDmaSourceOverride = 0;
+
+    if (!useChannelDmaForBidir) {
+        //uint8_t timerIndex = lookupTimerIndex(timerHardware->tim);
+        uint8_t burstDmaTimerIndex = getBurstDmaTimerIndex(timerHardware->tim);
+        if (burstDmaTimerIndex >= MAX_DMA_TIMERS) {
+            return NULL;
+        }
+
+        port->dmaBurstBuffer = &dmaBurstBuffer[burstDmaTimerIndex][0];
+        burstDmaTimer = &burstDmaTimers[burstDmaTimerIndex];
+        burstDmaTimer->dmaBurstBuffer = port->dmaBurstBuffer;
     }
 
-    port->dmaBurstBuffer = &dmaBurstBuffer[burstDmaTimerIndex][0];
-    burstDmaTimer_t *burstDmaTimer = &burstDmaTimers[burstDmaTimerIndex];
-    burstDmaTimer->dmaBurstBuffer = port->dmaBurstBuffer;
+#ifdef USE_DSHOT_BIDIR
+    (void)burstDmaTagOverride;
+    (void)burstDmaSourceOverride;
+#endif
 
-    if (timerPWMConfigDMABurst(burstDmaTimer, port->tch, port->dmaBurstBuffer, sizeof(port->dmaBurstBuffer[0]), DSHOT_DMA_BUFFER_SIZE)) {
+    if (useChannelDmaForBidir) {
+        if (timerPWMConfigChannelDMA(port->tch, port->dmaBuffer, sizeof(port->dmaBuffer[0]), DSHOT_DMA_BUFFER_SIZE)) {
+            ZERO_FARRAY(port->dmaBuffer);
+            port->configured = true;
+        }
+    } else if (timerPWMConfigDMABurst(burstDmaTimer, port->tch, port->dmaBurstBuffer, sizeof(port->dmaBurstBuffer[0]), DSHOT_DMA_BUFFER_SIZE, burstDmaTagOverride, burstDmaSourceOverride)) {
         port->configured = true;
     }
 #else
@@ -352,7 +370,7 @@ static uint16_t prepareDshotPacket(const uint16_t value, bool requestTelemetry)
     csum &= 0xf;
 
 #ifdef USE_DSHOT_BIDIR
-    if (dshotBidirModeActive) {
+    if (isDshotBidirModeActive()) {
         csum = (~csum) & 0xf;
     }
 #endif
@@ -393,7 +411,7 @@ bool isMotorProtocolDigital(void)
 bool isDshotBidirModeActive(void)
 {
 #ifdef USE_DSHOT_BIDIR
-    return dshotBidirModeActive && dshotBidirConfiguredMotorCount == getMotorCount();
+    return dshotBidirIsRuntimeActive(dshotBidirModeActive, dshotBidirConfiguredMotorCount, getMotorCount(), dshotBidirIsReady());
 #else
     return false;
 #endif
@@ -484,9 +502,15 @@ void pwmCompleteMotorUpdate(void) {
     }
 
 #ifdef USE_DSHOT_BIDIR
-    if (dshotBidirModeActive && !dshotBidirUpdate()) {
+    const bool dshotBidirActive = isDshotBidirModeActive();
+    const bool dshotBidirUsesBurst = dshotBidirActive && dshotBidirUsesBurstOutput();
+
+    if (dshotBidirActive && !dshotBidirUpdate()) {
         return;
     }
+#else
+    const bool dshotBidirActive = false;
+    const bool dshotBidirUsesBurst = false;
 #endif
 
     int motorCount = getMotorCount();
@@ -507,29 +531,48 @@ void pwmCompleteMotorUpdate(void) {
         }
 
 #ifdef USE_DSHOT_DMAR
-        for (int index = 0; index < motorCount; index++) {
-            if (motors[index].pwmPort && motors[index].pwmPort->configured) {
-                const bool requestTelemetry = dshotBidirModeActive || motors[index].requestTelemetry;
-                uint16_t packet = prepareDshotPacket(motors[index].value, requestTelemetry);
-                loadDmaBufferDshotStride(&motors[index].pwmPort->dmaBurstBuffer[motors[index].pwmPort->tch->timHw->channelIndex], 4, packet);
-                motors[index].requestTelemetry = false;
+        if (!dshotBidirActive || dshotBidirUsesBurst) {
+            for (int index = 0; index < motorCount; index++) {
+                if (motors[index].pwmPort && motors[index].pwmPort->configured) {
+                    const bool requestTelemetry = dshotBidirActive || motors[index].requestTelemetry;
+                    uint16_t packet = prepareDshotPacket(motors[index].value, requestTelemetry);
+                    loadDmaBufferDshotStride(&motors[index].pwmPort->dmaBurstBuffer[motors[index].pwmPort->tch->timHw->channelIndex], 4, packet);
+                    motors[index].requestTelemetry = false;
+                }
             }
-        }
 
 #ifdef USE_DSHOT_BIDIR
-        if (dshotBidirModeActive) {
-            dshotBidirOnFrameStarted();
-        }
+            if (dshotBidirActive) {
+                dshotBidirOnFrameStarted();
+            }
 #endif
-        for (int burstDmaTimerIndex = 0; burstDmaTimerIndex < burstDmaTimersCount; burstDmaTimerIndex++) {
-            burstDmaTimer_t *burstDmaTimer = &burstDmaTimers[burstDmaTimerIndex];
-            pwmBurstDMAStart(burstDmaTimer, DSHOT_DMA_BUFFER_SIZE * 4);
+            for (int burstDmaTimerIndex = 0; burstDmaTimerIndex < burstDmaTimersCount; burstDmaTimerIndex++) {
+                burstDmaTimer_t *burstDmaTimer = &burstDmaTimers[burstDmaTimerIndex];
+                pwmBurstDMAStart(burstDmaTimer, DSHOT_DMA_BUFFER_SIZE * 4);
+            }
+        } else {
+            for (int index = 0; index < motorCount; index++) {
+                if (motors[index].pwmPort && motors[index].pwmPort->configured) {
+                    const bool requestTelemetry = true;
+                    uint16_t packet = prepareDshotPacket(motors[index].value, requestTelemetry);
+                    loadDmaBufferDshotStride(motors[index].pwmPort->dmaBuffer, 1, packet);
+                    timerPWMPrepareDMA(motors[index].pwmPort->tch, DSHOT_DMA_BUFFER_SIZE);
+                    motors[index].requestTelemetry = false;
+                }
+            }
+
+            dshotBidirOnFrameStarted();
+            for (int index = 0; index < motorCount; index++) {
+                if (motors[index].pwmPort && motors[index].pwmPort->configured) {
+                    timerPWMStartDMA(motors[index].pwmPort->tch);
+                }
+            }
         }
 #else
         // Generate DMA buffers
         for (int index = 0; index < motorCount; index++) {
             if (motors[index].pwmPort && motors[index].pwmPort->configured) {
-                const bool requestTelemetry = dshotBidirModeActive || motors[index].requestTelemetry;
+                const bool requestTelemetry = dshotBidirActive || motors[index].requestTelemetry;
                 uint16_t packet = prepareDshotPacket(motors[index].value, requestTelemetry);
                 loadDmaBufferDshot(motors[index].pwmPort->dmaBuffer, packet);
                 timerPWMPrepareDMA(motors[index].pwmPort->tch, DSHOT_DMA_BUFFER_SIZE);
@@ -681,12 +724,13 @@ bool pwmMotorConfig(const timerHardware_t *timerHardware, uint8_t motorIndex, bo
 #ifdef USE_DSHOT_BIDIR
     if (dshotBidirModeActive && motors[motorIndex].pwmPort != NULL) {
         timerDMASafeType_t *dmaBurstBufferForMotor = NULL;
+        timerDMASafeType_t *dmaOutputBufferForMotor = motors[motorIndex].pwmPort->dmaBuffer;
 
 #ifdef USE_DSHOT_DMAR
         dmaBurstBufferForMotor = motors[motorIndex].pwmPort->dmaBurstBuffer;
 #endif
 
-        if (dshotBidirAttachMotor(motorIndex, motors[motorIndex].pwmPort->tch, dmaBurstBufferForMotor)) {
+        if (dshotBidirAttachMotor(motorIndex, motors[motorIndex].pwmPort->tch, dmaBurstBufferForMotor, dmaOutputBufferForMotor)) {
             dshotBidirConfiguredMotorCount++;
         }
     }

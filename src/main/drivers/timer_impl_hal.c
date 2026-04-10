@@ -328,6 +328,10 @@ static void impl_timerDMA_IRQHandler(DMA_t descriptor)
         LL_TIM_DisableDMAReq_CCx(tch->timHw->tim, lookupDMASourceTable[tch->timHw->channelIndex]);
 
         DMA_CLEAR_FLAG(descriptor, DMA_IT_TCIF);
+
+        if (tch->dmaCb) {
+            tch->dmaCb(tch);
+        }
     }
 }
 
@@ -412,9 +416,12 @@ bool impl_timerPWMConfigChannelDMA(TCH_t * tch, void * dmaBuffer, uint8_t dmaBuf
 }
 
 #ifdef USE_DSHOT_DMAR
-bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount)
+bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount, dmaTag_t dmaTagOverride, uint16_t dmaSourceOverride)
 {
-    tch->dma = dmaGetByTag(tch->timHw->dmaTag);
+    const dmaTag_t burstDmaTag = (dmaTagOverride != DMA_NONE) ? dmaTagOverride : tch->timHw->dmaTag;
+    const uint16_t burstDmaSource = dmaSourceOverride ? dmaSourceOverride : lookupDMASourceTable[tch->timHw->channelIndex];
+
+    tch->dma = dmaGetByTag(burstDmaTag);
     tch->dmaBuffer = dmaBuffer;
     if (tch->dma == NULL) {
         return false;
@@ -429,7 +436,7 @@ bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, vo
         // We assume that timer channels are already initialized by calls to:
         //  timerConfigBase
         //  timerPWMConfigChannel
-        const uint32_t streamLL = lookupDMALLStreamTable[DMATAG_GET_STREAM(tch->timHw->dmaTag)];
+        const uint32_t streamLL = lookupDMALLStreamTable[DMATAG_GET_STREAM(burstDmaTag)];
 
         LL_DMA_DeInit(tch->dma->dma, streamLL);
 
@@ -438,9 +445,9 @@ bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, vo
 
 #if defined(STM32H7) || defined(STM32G4)
         // For H7 the DMA periphRequest is encoded in the DMA tag
-        init.PeriphRequest = DMATAG_GET_CHANNEL(tch->timHw->dmaTag);
+        init.PeriphRequest = DMATAG_GET_CHANNEL(burstDmaTag);
 #else
-        init.Channel = lookupDMALLChannelTable[DMATAG_GET_CHANNEL(tch->timHw->dmaTag)];
+        init.Channel = lookupDMALLChannelTable[DMATAG_GET_CHANNEL(burstDmaTag)];
 #endif
 
         init.PeriphOrM2MSrcAddress = (uint32_t)&tch->timHw->tim->DMAR;
@@ -483,8 +490,8 @@ bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, vo
         LL_DMA_Init(tch->dma->dma, streamLL, &init);
 
         tch->timCtx->dmaBurstRef = tch->dma;
-        burstDmaTimer->burstRequestSource = lookupDMASourceTable[tch->timHw->channelIndex];
-        burstDmaTimer->streamLL = lookupDMALLStreamTable[DMATAG_GET_STREAM(tch->timHw->dmaTag)];
+        burstDmaTimer->burstRequestSource = burstDmaSource;
+        burstDmaTimer->streamLL = lookupDMALLStreamTable[DMATAG_GET_STREAM(burstDmaTag)];
         burstDmaTimer->dma = tch->dma->dma;
 
         tch->dmaState = TCH_DMA_READY;
@@ -509,8 +516,11 @@ void impl_pwmBurstDMAStart(burstDmaTimer_t * burstDmaTimer, uint32_t BurstLength
     /* configure the DMA Burst Mode */
     LL_TIM_ConfigDMABurst(burstDmaTimer->timer, LL_TIM_DMABURST_BASEADDR_CCR1, LL_TIM_DMABURST_LENGTH_4TRANSFERS);
     /* Enable the TIM DMA Request */
-    //LL_TIM_EnableDMAReq_UPDATE(burstDmaTimer->timer);
-    LL_TIM_EnableDMAReq_CCx(burstDmaTimer->timer, burstDmaTimer->burstRequestSource);
+    if (burstDmaTimer->burstRequestSource == TIM_DMA_Update) {
+        LL_TIM_EnableDMAReq_UPDATE(burstDmaTimer->timer);
+    } else {
+        LL_TIM_EnableDMAReq_CCx(burstDmaTimer->timer, burstDmaTimer->burstRequestSource);
+    }
 }
 #endif
 

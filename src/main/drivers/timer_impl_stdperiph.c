@@ -276,6 +276,10 @@ static void impl_timerDMA_IRQHandler(DMA_t descriptor)
         TIM_DMACmd(tch->timHw->tim, lookupDMASourceTable[tch->timHw->channelIndex], DISABLE);
 
         DMA_CLEAR_FLAG(descriptor, DMA_IT_TCIF);
+
+        if (tch->dmaCb) {
+            tch->dmaCb(tch);
+        }
     }
 }
 
@@ -363,13 +367,15 @@ bool impl_timerPWMConfigChannelDMA(TCH_t * tch, void * dmaBuffer, uint8_t dmaBuf
 }
 
 #ifdef USE_DSHOT_DMAR
-bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount)
+bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount, dmaTag_t dmaTagOverride, uint16_t dmaSourceOverride)
 {
     DMA_InitTypeDef DMA_InitStructure;
     TIM_TypeDef * timer = tch->timHw->tim;
+    const dmaTag_t burstDmaTag = (dmaTagOverride != DMA_NONE) ? dmaTagOverride : tch->timHw->dmaTag;
+    const uint16_t burstDmaSource = dmaSourceOverride ? dmaSourceOverride : lookupDMASourceTable[tch->timHw->channelIndex];
     
     if (!tch->timCtx->dmaBurstRef) {
-        tch->dma = dmaGetByTag(tch->timHw->dmaTag);
+        tch->dma = dmaGetByTag(burstDmaTag);
         if (tch->dma == NULL) {
             return false;
         }
@@ -431,7 +437,7 @@ bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, vo
         }
 
 #ifdef STM32F4
-        DMA_InitStructure.DMA_Channel = dmaGetChannelByTag(tch->timHw->dmaTag);
+        DMA_InitStructure.DMA_Channel = dmaGetChannelByTag(burstDmaTag);
         DMA_InitStructure.DMA_Memory0BaseAddr = (uint32_t)dmaBuffer;
         DMA_InitStructure.DMA_DIR = DMA_DIR_MemoryToPeripheral;
         DMA_InitStructure.DMA_Priority = DMA_Priority_High;
@@ -446,7 +452,7 @@ bool impl_timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, vo
         DMA_ITConfig(tch->dma->ref, DMA_IT_TC, ENABLE);
 
         tch->timCtx->dmaBurstRef = tch->dma;
-        tch->timCtx->DMASource = lookupDMASourceTable[tch->timHw->channelIndex];
+        tch->timCtx->DMASource = burstDmaSource;
         burstDmaTimer->dmaBurstStream = tch->timCtx->dmaBurstRef->ref;
         burstDmaTimer->burstRequestSource = tch->timCtx->DMASource;
         

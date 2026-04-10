@@ -136,6 +136,7 @@ TCH_t * timerGetTCH(const timerHardware_t * timHw)
     timerCtx[timerIndex]->ch[timHw->channelIndex].timHw = timHw;
     timerCtx[timerIndex]->ch[timHw->channelIndex].dma = NULL;
     timerCtx[timerIndex]->ch[timHw->channelIndex].cb = NULL;
+    timerCtx[timerIndex]->ch[timHw->channelIndex].dmaCb = NULL;
     timerCtx[timerIndex]->ch[timHw->channelIndex].dmaState = TCH_DMA_IDLE;
 
     return &timerCtx[timerIndex]->ch[timHw->channelIndex];
@@ -153,6 +154,10 @@ void timerChConfigCallbacks(TCH_t * tch, timerCallbacks_t * cb)
 {
     if (tch == NULL) {
         return;
+    }
+
+    if (cb->callbackEdge || cb->callbackOvr) {
+        impl_timerNVICConfigure(tch, NVIC_PRIO_TIMER);
     }
 
     if (cb->callbackEdge == NULL) {
@@ -263,6 +268,33 @@ void timerChCaptureDisable(TCH_t * tch)
     impl_timerChCaptureCompareEnable(tch, false);
 }
 
+void timerChClearFlags(TCH_t *tch, uint32_t flags)
+{
+    if (tch == NULL) {
+        return;
+    }
+
+    impl_timerClearFlag(tch, flags);
+}
+
+void timerChClearCaptureAndUpdateFlags(TCH_t *tch)
+{
+    if (tch == NULL) {
+        return;
+    }
+
+    impl_timerClearFlag(tch, TIM_IT_CCx(tch->timHw->channelIndex) | IMPL_TIM_IT_UPDATE_INTERRUPT);
+}
+
+void timerChConfigDmaCallback(TCH_t *tch, timerDmaCallbackFn *cb)
+{
+    if (tch == NULL) {
+        return;
+    }
+
+    tch->dmaCb = cb;
+}
+
 uint32_t timerGetBaseClock(TCH_t * tch)
 {
     return timerGetBaseClockHW(tch->timHw);
@@ -299,9 +331,9 @@ bool timerPWMDMAInProgress(TCH_t * tch)
 }
 
 #ifdef USE_DSHOT_DMAR
-bool timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount)
+bool timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount, dmaTag_t dmaTagOverride, uint16_t dmaSourceOverride)
 {
-    return impl_timerPWMConfigDMABurst(burstDmaTimer, tch, dmaBuffer, dmaBufferElementSize, dmaBufferElementCount);
+    return impl_timerPWMConfigDMABurst(burstDmaTimer, tch, dmaBuffer, dmaBufferElementSize, dmaBufferElementCount, dmaTagOverride, dmaSourceOverride);
 }
 
 void pwmBurstDMAStart(burstDmaTimer_t * burstDmaTimer, uint32_t BurstLength)

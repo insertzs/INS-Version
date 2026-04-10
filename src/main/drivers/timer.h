@@ -146,6 +146,7 @@ struct timHardwareContext_s;
 
 // Timer generic callback
 typedef void timerCallbackFn(struct TCH_s * tch, uint32_t value);
+typedef void timerDmaCallbackFn(struct TCH_s * tch);
 
 typedef struct timerCallbacks_s {
     void *            callbackParam;
@@ -158,6 +159,7 @@ typedef struct TCH_s {
     struct timHardwareContext_s *   timCtx;         // Run-time initialized to parent timer
     const timerHardware_t *         timHw;          // Link to timerHardware_t definition (target-specific)
     const timerCallbacks_t *        cb;
+    timerDmaCallbackFn *            dmaCb;
     DMA_t                           dma;            // Timer channel DMA handle
     volatile tchDmaState_e          dmaState;
     void *                          dmaBuffer;
@@ -238,6 +240,9 @@ void timerChConfigIC(TCH_t * tch, bool polarityRising, unsigned inputFilterSampl
 void timerChConfigCallbacks(TCH_t * tch, timerCallbacks_t * cb);
 void timerChCaptureEnable(TCH_t * tch);
 void timerChCaptureDisable(TCH_t * tch);
+void timerChClearFlags(TCH_t *tch, uint32_t flags);
+void timerChClearCaptureAndUpdateFlags(TCH_t *tch);
+void timerChConfigDmaCallback(TCH_t *tch, timerDmaCallbackFn *cb);
 
 void timerInit(void);
 void timerStart(void);
@@ -263,6 +268,6 @@ volatile timCCR_t *timerCCR(TCH_t * tch);
 uint8_t timer2id(const HAL_Timer_t *tim);
 
 #ifdef USE_DSHOT_DMAR
-bool timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount);
+bool timerPWMConfigDMABurst(burstDmaTimer_t *burstDmaTimer, TCH_t * tch, void * dmaBuffer, uint8_t dmaBufferElementSize, uint32_t dmaBufferElementCount, dmaTag_t dmaTagOverride, uint16_t dmaSourceOverride);
 void pwmBurstDMAStart(burstDmaTimer_t * burstDmaTimer, uint32_t BurstLength);
 #endif

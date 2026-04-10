@@ -4046,6 +4046,22 @@ static void cliStatus(char *cmdline)
 
     char buf[MAX(FORMATTED_DATE_TIME_BUFSIZE, SETTING_MAX_NAME_LENGTH)];
     dateTime_t dt;
+#ifdef USE_DSHOT_BIDIR
+    const char *dshotBidirEventName = "NONE";
+    switch (dshotBidirGetLastEvent()) {
+    case 1:
+        dshotBidirEventName = "CAPTURE";
+        break;
+    case 2:
+        dshotBidirEventName = "TIMEOUT";
+        break;
+    case 3:
+        dshotBidirEventName = "DECODE";
+        break;
+    default:
+        break;
+    }
+#endif
 
     cliPrintLinef("%s/%s %s %s / %s (%s) %s",
         FC_FIRMWARE_NAME,
@@ -4157,6 +4173,87 @@ static void cliStatus(char *cmdline)
         dshotBidirGetLastRpmValue(1),
         dshotBidirGetLastRpmValue(2),
         dshotBidirGetLastRpmValue(3));
+    cliPrintLinef("DShot Bidir Flow: state=%u, burst=%lu, capture=%lu, req=0x%04x, lag=%lu",
+        dshotBidirGetState(),
+        dshotBidirGetBurstCompleteCount(),
+        dshotBidirGetCaptureStartCount(),
+        (unsigned)dshotBidirGetBurstRequestSource(),
+        dshotBidirGetLastBurstLatencyUs());
+    cliPrintLinef("DShot Bidir Trace: mode=%s, upd=%u, mask=0x%02x/0x%02x, win=%lu/%lu",
+        dshotBidirUsesBurstOutput() ? "burst" : "chan",
+        dshotBidirGetOutputUpdateCount(),
+        (unsigned)dshotBidirGetOutputCompleteMask(),
+        (unsigned)dshotBidirGetOutputExpectedMask(),
+        dshotBidirGetOutputWindowUs(),
+        dshotBidirGetCaptureWindowUs());
+    cliPrintLinef("DShot Bidir Last: event=%s, elapsed=%lu, upd=%u, mask=0x%02x/0x%02x, timer=%lu/%lu, cb=%lu/%lu",
+        dshotBidirEventName,
+        dshotBidirGetLastEventElapsedUs(),
+        dshotBidirGetLastOutputUpdateCount(),
+        (unsigned)dshotBidirGetLastOutputCompleteMask(),
+        (unsigned)dshotBidirGetLastOutputExpectedMask(),
+        dshotBidirGetLastTimerArr(),
+        dshotBidirGetLastTimerCnt(),
+        dshotBidirGetOverflowCallbackCount(),
+        dshotBidirGetOutputDmaCallbackCount());
+    static const char * const dshotBidirDecodeName[] = {
+        "NONE",
+        "OK",
+        "NOEDGE",
+        "EMPTY",
+        "LENGTH",
+        "GCR",
+        "CHECKSUM",
+        "ERPM",
+    };
+    const uint8_t dshotBidirDecodeStatus = dshotBidirGetLastDecodeStatus();
+    const char *dshotBidirDecodeStatusName = (dshotBidirDecodeStatus < ARRAYLEN(dshotBidirDecodeName)) ?
+        dshotBidirDecodeName[dshotBidirDecodeStatus] :
+        "UNKNOWN";
+    cliPrintLinef("DShot Bidir Decode: motor=%u, reason=%s, edges=%u, gcr=0x%05lx, word=0x%04x, dt=%u/%u/%u/%u",
+        (unsigned)dshotBidirGetLastDecodeMotor(),
+        dshotBidirDecodeStatusName,
+        (unsigned)dshotBidirGetLastDecodeEdgeCount(),
+        dshotBidirGetLastDecodeGcrValue(),
+        (unsigned)dshotBidirGetLastDecodeWord(),
+        (unsigned)dshotBidirGetLastDecodeDelta(0),
+        (unsigned)dshotBidirGetLastDecodeDelta(1),
+        (unsigned)dshotBidirGetLastDecodeDelta(2),
+        (unsigned)dshotBidirGetLastDecodeDelta(3));
+    cliPrintLinef("DShot Bidir Motors: read=%lu/%lu/%lu/%lu, invalid=%lu/%lu/%lu/%lu, noedge=%lu/%lu/%lu/%lu, irq=%lu/%lu/%lu/%lu",
+        dshotBidirGetMotorReadCount(0),
+        dshotBidirGetMotorReadCount(1),
+        dshotBidirGetMotorReadCount(2),
+        dshotBidirGetMotorReadCount(3),
+        dshotBidirGetMotorInvalidCount(0),
+        dshotBidirGetMotorInvalidCount(1),
+        dshotBidirGetMotorInvalidCount(2),
+        dshotBidirGetMotorInvalidCount(3),
+        dshotBidirGetMotorNoEdgeCount(0),
+        dshotBidirGetMotorNoEdgeCount(1),
+        dshotBidirGetMotorNoEdgeCount(2),
+        dshotBidirGetMotorNoEdgeCount(3),
+        dshotBidirGetMotorIrqEdgeCallbackCount(0),
+        dshotBidirGetMotorIrqEdgeCallbackCount(1),
+        dshotBidirGetMotorIrqEdgeCallbackCount(2),
+        dshotBidirGetMotorIrqEdgeCallbackCount(3));
+    cliPrintLinef("DShot Bidir Latch: diag=%s/%s/%s/%s, edges=%u/%u/%u/%u, raw=%u/%u/%u/%u, rpm=%lu/%lu/%lu/%lu",
+        dshotBidirDecodeName[dshotBidirGetMotorLastInterestingDiag(0)],
+        dshotBidirDecodeName[dshotBidirGetMotorLastInterestingDiag(1)],
+        dshotBidirDecodeName[dshotBidirGetMotorLastInterestingDiag(2)],
+        dshotBidirDecodeName[dshotBidirGetMotorLastInterestingDiag(3)],
+        (unsigned)dshotBidirGetMotorLastInterestingEdgeCount(0),
+        (unsigned)dshotBidirGetMotorLastInterestingEdgeCount(1),
+        (unsigned)dshotBidirGetMotorLastInterestingEdgeCount(2),
+        (unsigned)dshotBidirGetMotorLastInterestingEdgeCount(3),
+        (unsigned)dshotBidirGetMotorLastInterestingRawValue(0),
+        (unsigned)dshotBidirGetMotorLastInterestingRawValue(1),
+        (unsigned)dshotBidirGetMotorLastInterestingRawValue(2),
+        (unsigned)dshotBidirGetMotorLastInterestingRawValue(3),
+        dshotBidirGetMotorLastInterestingRpmValue(0),
+        dshotBidirGetMotorLastInterestingRpmValue(1),
+        dshotBidirGetMotorLastInterestingRpmValue(2),
+        dshotBidirGetMotorLastInterestingRpmValue(3));
 #endif
 
 #ifdef USE_SDCARD

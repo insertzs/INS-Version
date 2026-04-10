@@ -215,6 +215,8 @@ main_sources(COMMON_SRC
     drivers/persistent.h
     drivers/dshot_bidir.c
     drivers/dshot_bidir.h
+    drivers/dshot_bidir_utils.c
+    drivers/dshot_bidir_utils.h
     drivers/pitotmeter/pitotmeter_adc.c
     drivers/pitotmeter/pitotmeter_adc.h
     drivers/pitotmeter/pitotmeter_ms4525.c

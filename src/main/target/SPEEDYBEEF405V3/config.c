@@ -55,11 +55,6 @@ void validateAndFixTargetConfig(void)
         return;
     }
 
-    if (getMotorCount() == 0 || getMotorCount() > 4) {
-        motorConfigMutable()->dshotBidirEnabled = false;
-        return;
-    }
-
     if (motorConfig()->motorPwmProtocol == PWM_TYPE_DSHOT600) {
         motorConfigMutable()->motorPwmProtocol = PWM_TYPE_DSHOT300;
     }

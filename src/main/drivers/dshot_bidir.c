@@ -22,6 +22,7 @@
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
 
+#include <stddef.h>
 #include <string.h>
 
 #include "platform.h"
@@ -33,6 +34,7 @@
 #include "common/time.h"
 
 #include "drivers/dma.h"
+#include "drivers/dshot_bidir_utils.h"
 #include "drivers/io.h"
 #include "drivers/nvic.h"
 #include "drivers/pwm_output.h"
@@ -44,20 +46,39 @@
 #define DSHOT_BIDIR_MOTOR_LIMIT            4
 #define DSHOT_BIDIR_CAPTURE_BUFFER_LEN     32
 #define DSHOT_BIDIR_MIN_GCR_EDGES          7
-#define DSHOT_BIDIR_INVALID                0xFFFF
-#define DSHOT_BIDIR_CAPTURE_DEADTIME_US    35
-#define DSHOT_BIDIR_TIMER_BIT_COUNT        16
-#define DSHOT_BIDIR_TIMER_BIT_LENGTH       20
 #define DSHOT_BIDIR_OUTPUT_PERIOD          (DSHOT_BIDIR_TIMER_BIT_LENGTH - 1)
-#define DSHOT_BIDIR_CAPTURE_FILTER         2
+#define DSHOT_BIDIR_CAPTURE_FILTER         0
 #define DSHOT_BIDIR_BURST_LENGTH           (18 * 4)
-#define DSHOT_BIDIR_ERPM_PER_LSB           100.0f
+#define DSHOT_BIDIR_OUTPUT_BUFFER_LEN      (DSHOT_BIDIR_BURST_LENGTH / 4)
+#define DSHOT_BIDIR_OUTPUT_COMPLETE_UPDATES (DSHOT_BIDIR_OUTPUT_BUFFER_LEN + 1U)
+#define DSHOT_BIDIR_STARTUP_COMPARE_VALUE  0xFFFF
+#define DSHOT_BIDIR_RUNTIME_IDLE_COMPARE   DSHOT_BIDIR_STARTUP_COMPARE_VALUE
+#define DSHOT_BIDIR_CAPTURE_START_DELAY_TICKS 0U
+#define DSHOT_BIDIR_PENDING_TIMEOUT_US     600U
 
 typedef enum {
     DSHOT_BIDIR_STATE_READY = 0,
     DSHOT_BIDIR_STATE_OUTPUT_PENDING,
     DSHOT_BIDIR_STATE_CAPTURING,
 } dshotBidirState_e;
+
+typedef enum {
+    DSHOT_BIDIR_EVENT_NONE = 0,
+    DSHOT_BIDIR_EVENT_CAPTURE_START,
+    DSHOT_BIDIR_EVENT_TIMEOUT,
+    DSHOT_BIDIR_EVENT_DECODE_COMPLETE,
+} dshotBidirEvent_e;
+
+typedef enum {
+    DSHOT_BIDIR_DIAG_NONE = 0,
+    DSHOT_BIDIR_DIAG_OK,
+    DSHOT_BIDIR_DIAG_NOEDGE,
+    DSHOT_BIDIR_DIAG_EMPTY,
+    DSHOT_BIDIR_DIAG_LENGTH,
+    DSHOT_BIDIR_DIAG_GCR,
+    DSHOT_BIDIR_DIAG_CHECKSUM,
+    DSHOT_BIDIR_DIAG_ERPM,
+} dshotBidirDiag_e;
 
 typedef struct {
     TCH_t *tch;
@@ -68,6 +89,9 @@ typedef struct {
     volatile uint8_t irqEdgeCount;
     timerCallbacks_t irqCallbacks;
     uint32_t captureBuffer[DSHOT_BIDIR_CAPTURE_BUFFER_LEN];
+    TIM_OCInitTypeDef outputInit;
+    TIM_ICInitTypeDef inputCaptureInit;
+    DMA_InitTypeDef outputDmaInit;
     DMA_InitTypeDef inputDmaInit;
 } dshotBidirMotor_t;
 
@@ -77,11 +101,19 @@ typedef struct {
     DMA_t burstDma;
     timerDMASafeType_t *dmaBurstBuffer;
     DMA_InitTypeDef burstOutputDmaInit;
+    uint16_t burstRequestSource;
+    uint16_t statusRequestSource;
+    uint32_t outputWindowUs;
     uint32_t captureWindowUs;
     timeUs_t frameStartedUs;
     volatile timeUs_t captureStartedUs;
     volatile dshotBidirState_e state;
+    volatile uint8_t outputExpectedMask;
+    volatile uint8_t outputCompleteMask;
+    volatile uint8_t outputUpdateCount;
+    timerCallbacks_t burstTimerCallbacks;
     bool burstHandlerInstalled;
+    bool useBurstOutput;
 } dshotBidirContext_t;
 
 static dshotBidirContext_t dshotBidirCtx;
@@ -91,10 +123,121 @@ static uint32_t dshotBidirReadCount = 0;
 static uint32_t dshotBidirInvalidPacketCount = 0;
 static uint32_t dshotBidirNoEdgeCount = 0;
 static uint32_t dshotBidirTimeoutCount = 0;
+static uint32_t dshotBidirBurstCompleteCount = 0;
+static uint32_t dshotBidirCaptureStartCount = 0;
+static uint32_t dshotBidirLastBurstLatencyUs = 0;
+static uint32_t dshotBidirOverflowCallbackCount = 0;
+static uint32_t dshotBidirOutputDmaCallbackCount = 0;
+static uint32_t dshotBidirLastEventElapsedUs = 0;
+static uint8_t dshotBidirLastEvent = DSHOT_BIDIR_EVENT_NONE;
+static uint8_t dshotBidirLastOutputUpdateCount = 0;
+static uint8_t dshotBidirLastOutputExpectedMask = 0;
+static uint8_t dshotBidirLastOutputCompleteMask = 0;
+static uint32_t dshotBidirLastTimerArr = 0;
+static uint32_t dshotBidirLastTimerCnt = 0;
 static uint8_t dshotBidirLastEdgeCount[DSHOT_BIDIR_MOTOR_LIMIT];
 static uint16_t dshotBidirLastRawValue[DSHOT_BIDIR_MOTOR_LIMIT];
 static uint32_t dshotBidirLastErpmValue[DSHOT_BIDIR_MOTOR_LIMIT];
 static uint32_t dshotBidirLastRpmValue[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint8_t dshotBidirLastDecodeMotor = DSHOT_BIDIR_MOTOR_LIMIT;
+static uint8_t dshotBidirLastDecodeStatus = DSHOT_BIDIR_DIAG_NONE;
+static uint8_t dshotBidirLastDecodeEdgeCount = 0;
+static uint32_t dshotBidirLastDecodeGcrValue = 0;
+static uint16_t dshotBidirLastDecodeWord = 0;
+static uint16_t dshotBidirLastDecodeDeltas[4];
+static uint32_t dshotBidirMotorReadCount[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint32_t dshotBidirMotorInvalidCount[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint32_t dshotBidirMotorNoEdgeCount[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint32_t dshotBidirMotorIrqEdgeCallbackCount[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint8_t dshotBidirMotorLastInterestingDiag[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint8_t dshotBidirMotorLastInterestingEdgeCount[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint16_t dshotBidirMotorLastInterestingRawValue[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint32_t dshotBidirMotorLastInterestingErpmValue[DSHOT_BIDIR_MOTOR_LIMIT];
+static uint32_t dshotBidirMotorLastInterestingRpmValue[DSHOT_BIDIR_MOTOR_LIMIT];
+
+static void dshotBidirLatchTrace(dshotBidirEvent_e event, uint32_t elapsedUs)
+{
+    dshotBidirLastEvent = (uint8_t)event;
+    dshotBidirLastEventElapsedUs = elapsedUs;
+    dshotBidirLastOutputUpdateCount = dshotBidirCtx.outputUpdateCount;
+    dshotBidirLastOutputExpectedMask = dshotBidirCtx.outputExpectedMask;
+    dshotBidirLastOutputCompleteMask = dshotBidirCtx.outputCompleteMask;
+    dshotBidirLastTimerArr = dshotBidirCtx.timer ? dshotBidirCtx.timer->ARR : 0;
+    dshotBidirLastTimerCnt = dshotBidirCtx.timer ? dshotBidirCtx.timer->CNT : 0;
+}
+
+static void dshotBidirApplyTimerPeriod(uint16_t period)
+{
+    TIM_TypeDef *timer = dshotBidirCtx.timer;
+
+    if (!timer) {
+        return;
+    }
+
+    TIM_ARRPreloadConfig(timer, ENABLE);
+    timer->ARR = period;
+    TIM_SetCounter(timer, 0);
+
+    // Force the preload value into the active ARR immediately.
+    TIM_GenerateEvent(timer, TIM_EventSource_Update);
+    TIM_ClearFlag(timer, TIM_FLAG_Update);
+}
+
+static void dshotBidirLatchDecodeTrace(uint8_t motorIndex, dshotBidirDiag_e status, const dshotBidirDecodeTrace_t *trace, const uint32_t *buffer, uint32_t edgeCount)
+{
+    dshotBidirLastDecodeMotor = motorIndex;
+    dshotBidirLastDecodeStatus = (uint8_t)status;
+    dshotBidirLastDecodeEdgeCount = edgeCount > UINT8_MAX ? UINT8_MAX : (uint8_t)edgeCount;
+    dshotBidirLastDecodeGcrValue = trace ? trace->gcrValue : 0;
+    dshotBidirLastDecodeWord = trace ? trace->decodedValue : 0;
+    memset(dshotBidirLastDecodeDeltas, 0, sizeof(dshotBidirLastDecodeDeltas));
+
+    if (!buffer || edgeCount < 2U) {
+        return;
+    }
+
+    const uint32_t maxDeltaCount = (uint32_t)ARRAYLEN(dshotBidirLastDecodeDeltas);
+    const uint32_t deltaCount = (edgeCount - 1U < maxDeltaCount) ? (edgeCount - 1U) : maxDeltaCount;
+    for (uint32_t i = 0; i < deltaCount; i++) {
+        dshotBidirLastDecodeDeltas[i] = (uint16_t)(buffer[i + 1U] - buffer[i]);
+    }
+}
+
+static void dshotBidirLatchMotorInteresting(uint8_t motorIndex, dshotBidirDiag_e status, uint32_t edgeCount, uint16_t rawValue, uint32_t erpm, uint32_t rpm)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return;
+    }
+
+    dshotBidirMotorLastInterestingDiag[motorIndex] = (uint8_t)status;
+    dshotBidirMotorLastInterestingEdgeCount[motorIndex] = edgeCount > UINT8_MAX ? UINT8_MAX : (uint8_t)edgeCount;
+    dshotBidirMotorLastInterestingRawValue[motorIndex] = rawValue;
+    dshotBidirMotorLastInterestingErpmValue[motorIndex] = erpm;
+    dshotBidirMotorLastInterestingRpmValue[motorIndex] = rpm;
+}
+
+static void dshotBidirWaitCaptureStartDelay(void)
+{
+    TIM_TypeDef *timer = dshotBidirCtx.timer;
+
+    if (!timer || DSHOT_BIDIR_CAPTURE_START_DELAY_TICKS == 0U) {
+        return;
+    }
+
+    const uint16_t startCount = (uint16_t)timer->CNT;
+    const uint16_t period = (uint16_t)(timer->ARR + 1U);
+
+    while (true) {
+        const uint16_t currentCount = (uint16_t)timer->CNT;
+        const uint16_t delta = (currentCount >= startCount) ?
+            (currentCount - startCount) :
+            (uint16_t)((period - startCount) + currentCount);
+
+        if (delta >= DSHOT_BIDIR_CAPTURE_START_DELAY_TICKS) {
+            return;
+        }
+    }
+}
 
 static void dshotBidirUpdateDebug(uint32_t readDelta, uint32_t invalidDelta, uint32_t noEdgeDelta, uint32_t timeoutDelta)
 {
@@ -140,95 +283,66 @@ static uint16_t dshotBidirTimerChannel(uint8_t channelIndex)
     }
 }
 
-static uint32_t dshotBidirDecodeTelemetryPacket(const uint32_t buffer[], uint32_t count)
+static uint32_t dshotBidirBurstDmaChannel(const TCH_t *tch)
 {
-    uint32_t value = 0;
-    uint32_t oldValue = buffer[0];
-    int bits = 0;
-    int len;
-
-    for (uint32_t i = 1; i <= count; i++) {
-        if (i < count) {
-            const int diff = buffer[i] - oldValue;
-            if (bits >= 21) {
-                break;
-            }
-            len = (diff + 8) / 16;
-        } else {
-            len = 21 - bits;
-        }
-
-        if (len <= 0 || (bits + len) > 21) {
-            return DSHOT_BIDIR_INVALID;
-        }
-
-        value <<= len;
-        value |= 1 << (len - 1);
-        oldValue = buffer[i];
-        bits += len;
+#ifdef STM32F4
+    if (tch && tch->timHw->tim == TIM4 && tch->timCtx->DMASource == TIM_DMA_Update) {
+        return DMA_Channel_2;
     }
+#endif
 
-    if (bits != 21) {
-        return DSHOT_BIDIR_INVALID;
-    }
-
-    static const uint32_t decodeTable[32] = {
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 10, 11, 0, 13, 14, 15,
-        0, 0, 2, 3, 0, 5, 6, 7, 0, 0, 8, 1, 0, 4, 12, 0
-    };
-
-    uint32_t decodedValue = decodeTable[value & 0x1f];
-    decodedValue |= decodeTable[(value >> 5) & 0x1f] << 4;
-    decodedValue |= decodeTable[(value >> 10) & 0x1f] << 8;
-    decodedValue |= decodeTable[(value >> 15) & 0x1f] << 12;
-
-    uint32_t csum = decodedValue;
-    csum ^= csum >> 8;
-    csum ^= csum >> 4;
-
-    if ((csum & 0xf) != 0xf) {
-        return DSHOT_BIDIR_INVALID;
-    }
-
-    return decodedValue >> 4;
+    return dmaGetChannelByTag(tch->timHw->dmaTag);
 }
 
-static uint32_t dshotBidirDecodeErpmTelemetryValue(uint16_t value)
+static uint32_t dshotBidirComputeOutputWindowUs(uint32_t dshotHz)
 {
-    if (value == 0x0fff) {
+    if (dshotHz == 0) {
         return 0;
     }
 
-    value = (value & 0x01ff) << ((value & 0xfe00) >> 9);
-    if (!value) {
-        return DSHOT_BIDIR_INVALID;
-    }
-
-    return (1000000U * 60U / 100U + value / 2U) / value;
+    return (1000000U * ((DSHOT_BIDIR_BURST_LENGTH / 4U) * DSHOT_BIDIR_TIMER_BIT_LENGTH)) / dshotHz;
 }
 
-static uint32_t dshotBidirComputeRpm(uint32_t erpm)
+static uint8_t dshotBidirGetMotorBit(const dshotBidirMotor_t *motor)
 {
-    const uint8_t polePairs = motorConfig()->motorPoleCount / 2;
+    const ptrdiff_t motorIndex = motor - dshotBidirMotors;
 
-    if (polePairs == 0) {
+    if (motorIndex < 0 || motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
         return 0;
     }
 
-    return lrintf((float)erpm * DSHOT_BIDIR_ERPM_PER_LSB / polePairs);
+    return (uint8_t)(1U << motorIndex);
 }
 
-static bool dshotBidirOutputInverted(const dshotBidirMotor_t *motor)
+static dshotBidirMotor_t *dshotBidirFindMotorByTch(TCH_t *tch)
 {
-    return (motor->tch->timHw->output & TIMER_OUTPUT_INVERTED) == 0;
+    for (uint8_t i = 0; i < DSHOT_BIDIR_MOTOR_LIMIT; i++) {
+        if (dshotBidirMotors[i].configured && dshotBidirMotors[i].tch == tch) {
+            return &dshotBidirMotors[i];
+        }
+    }
+
+    return NULL;
+}
+
+static bool dshotBidirOriginalOutputInverted(const dshotBidirMotor_t *motor)
+{
+    return (motor->tch->timHw->output & TIMER_OUTPUT_INVERTED) != 0;
+}
+
+static bool dshotBidirWireOutputInverted(const dshotBidirMotor_t *motor)
+{
+    // Bidirectional DShot on STM32 timers still uses the normal DShot line
+    // polarity; only the telemetry request/checksum semantics are inverted.
+    return dshotBidirOriginalOutputInverted(motor);
 }
 
 static ioConfig_t dshotBidirGetIoConfig(const dshotBidirMotor_t *motor)
 {
-    return (motor->tch->timHw->output & TIMER_OUTPUT_INVERTED) ? IOCFG_AF_PP_PD : IOCFG_AF_PP_UP;
+    return dshotBidirOriginalOutputInverted(motor) ? IOCFG_AF_PP_PD : IOCFG_AF_PP_UP;
 }
 
-static void dshotBidirConfigureOutputIo(const dshotBidirMotor_t *motor)
+static void dshotBidirConfigureIo(const dshotBidirMotor_t *motor)
 {
     const IO_t io = IOGetByTag(motor->tch->timHw->tag);
     IOConfigGPIOAF(io, dshotBidirGetIoConfig(motor), motor->tch->timHw->alternateFunction);
@@ -245,12 +359,12 @@ static void dshotBidirConfigureOutputChannel(const dshotBidirMotor_t *motor, uin
     if (motor->tch->timHw->output & TIMER_OUTPUT_N_CHANNEL) {
         outputInit.TIM_OutputState = TIM_OutputState_Disable;
         outputInit.TIM_OutputNState = TIM_OutputNState_Enable;
-        outputInit.TIM_OCNPolarity = dshotBidirOutputInverted(motor) ? TIM_OCPolarity_Low : TIM_OCPolarity_High;
+        outputInit.TIM_OCNPolarity = dshotBidirWireOutputInverted(motor) ? TIM_OCPolarity_Low : TIM_OCPolarity_High;
         outputInit.TIM_OCNIdleState = TIM_OCIdleState_Reset;
     } else {
         outputInit.TIM_OutputState = TIM_OutputState_Enable;
-        outputInit.TIM_OutputNState = TIM_OutputState_Disable;
-        outputInit.TIM_OCPolarity = dshotBidirOutputInverted(motor) ? TIM_OCPolarity_Low : TIM_OCPolarity_High;
+        outputInit.TIM_OutputNState = TIM_OutputNState_Disable;
+        outputInit.TIM_OCPolarity = dshotBidirWireOutputInverted(motor) ? TIM_OCPolarity_Low : TIM_OCPolarity_High;
         outputInit.TIM_OCIdleState = TIM_OCIdleState_Set;
     }
 
@@ -302,18 +416,38 @@ static void dshotBidirIrqCaptureCallback(TCH_t *tch, uint32_t value)
     }
 }
 
-static void dshotBidirConfigureInputCapture(TCH_t *tch)
+static void dshotBidirConfigureInputCapture(const dshotBidirMotor_t *motor)
 {
     TIM_ICInitTypeDef icInit;
 
     TIM_ICStructInit(&icInit);
-    icInit.TIM_Channel = dshotBidirTimerChannel(tch->timHw->channelIndex);
+    icInit.TIM_Channel = dshotBidirTimerChannel(motor->tch->timHw->channelIndex);
     icInit.TIM_ICPolarity = TIM_ICPolarity_BothEdge;
     icInit.TIM_ICSelection = TIM_ICSelection_DirectTI;
     icInit.TIM_ICPrescaler = TIM_ICPSC_DIV1;
     icInit.TIM_ICFilter = DSHOT_BIDIR_CAPTURE_FILTER;
 
-    TIM_ICInit(tch->timHw->tim, &icInit);
+    TIM_ICInit(motor->tch->timHw->tim, &icInit);
+}
+
+static void dshotBidirDisableBurstTimerCallback(void)
+{
+    if (dshotBidirCtx.burstTch) {
+        timerChConfigCallbacks(dshotBidirCtx.burstTch, (timerCallbacks_t *)&dshotBidirCallbacksDisabled);
+    }
+}
+
+static void dshotBidirRestoreOutputDma(dshotBidirMotor_t *motor)
+{
+    if (motor->useInterruptCapture || !motor->dma) {
+        return;
+    }
+
+    DMA_Cmd(motor->dma->ref, DISABLE);
+    TIM_DMACmd(motor->tch->timHw->tim, motor->dmaSource, DISABLE);
+    DMA_DeInit(motor->dma->ref);
+    DMA_Init(motor->dma->ref, &motor->outputDmaInit);
+    DMA_ITConfig(motor->dma->ref, DMA_IT_TC, ENABLE);
 }
 
 static void dshotBidirRestoreOutputChannel(dshotBidirMotor_t *motor)
@@ -327,8 +461,12 @@ static void dshotBidirRestoreOutputChannel(dshotBidirMotor_t *motor)
         timerChConfigCallbacks(motor->tch, (timerCallbacks_t *)&dshotBidirCallbacksDisabled);
     }
 
-    dshotBidirConfigureOutputIo(motor);
-    dshotBidirConfigureOutputChannel(motor, 0);
+    if (!dshotBidirCtx.useBurstOutput) {
+        dshotBidirRestoreOutputDma(motor);
+    }
+
+    dshotBidirConfigureIo(motor);
+    dshotBidirConfigureOutputChannel(motor, DSHOT_BIDIR_RUNTIME_IDLE_COMPARE);
     timerPWMStart(motor->tch);
 }
 
@@ -339,10 +477,21 @@ static void dshotBidirRestoreBurstDma(void)
     }
 
     DMA_Cmd(dshotBidirCtx.burstDma->ref, DISABLE);
-    TIM_DMACmd(dshotBidirCtx.timer, dshotBidirCtx.burstTch->timCtx->DMASource, DISABLE);
+    TIM_DMACmd(dshotBidirCtx.timer, dshotBidirCtx.burstRequestSource, DISABLE);
     DMA_DeInit(dshotBidirCtx.burstDma->ref);
     DMA_Init(dshotBidirCtx.burstDma->ref, &dshotBidirCtx.burstOutputDmaInit);
     DMA_ITConfig(dshotBidirCtx.burstDma->ref, DMA_IT_TC, ENABLE);
+}
+
+static void dshotBidirStopOutputBurst(void)
+{
+    if (!dshotBidirCtx.burstDma || !dshotBidirCtx.timer || !dshotBidirCtx.burstTch) {
+        return;
+    }
+
+    DMA_Cmd(dshotBidirCtx.burstDma->ref, DISABLE);
+    TIM_DMACmd(dshotBidirCtx.timer, dshotBidirCtx.burstRequestSource, DISABLE);
+    DMA_CLEAR_FLAG(dshotBidirCtx.burstDma, DMA_IT_TCIF);
 }
 
 static void dshotBidirStartInputCapture(void)
@@ -354,9 +503,13 @@ static void dshotBidirStartInputCapture(void)
         return;
     }
 
-    TIM_ARRPreloadConfig(timer, ENABLE);
-    timer->ARR = 0xFFFF;
-    TIM_SetCounter(timer, 0);
+    dshotBidirCtx.state = DSHOT_BIDIR_STATE_CAPTURING;
+    dshotBidirStopOutputBurst();
+    dshotBidirDisableBurstTimerCallback();
+    dshotBidirCaptureStartCount++;
+    dshotBidirLatchTrace(DSHOT_BIDIR_EVENT_CAPTURE_START, cmpTimeUs(micros(), dshotBidirCtx.frameStartedUs));
+
+    dshotBidirApplyTimerPeriod(0xFFFF);
 
     for (uint8_t i = 0; i < DSHOT_BIDIR_MOTOR_LIMIT; i++) {
         dshotBidirMotor_t *motor = &dshotBidirMotors[i];
@@ -366,40 +519,45 @@ static void dshotBidirStartInputCapture(void)
 
         memset(motor->captureBuffer, 0, sizeof(motor->captureBuffer));
         motor->irqEdgeCount = 0;
-        dshotBidirConfigureInputCapture(motor->tch);
+        dshotBidirConfigureIo(motor);
+        dshotBidirConfigureInputCapture(motor);
+        timerChClearCaptureAndUpdateFlags(motor->tch);
 
         if (motor->useInterruptCapture) {
             timerChConfigCallbacks(motor->tch, &motor->irqCallbacks);
-            timerChCaptureEnable(motor->tch);
-            continue;
+        } else {
+            DMA_Cmd(motor->dma->ref, DISABLE);
+            TIM_DMACmd(timer, motor->dmaSource, DISABLE);
+            DMA_CLEAR_FLAG(motor->dma, DMA_IT_TCIF);
+            DMA_DeInit(motor->dma->ref);
+            DMA_Init(motor->dma->ref, &motor->inputDmaInit);
+            DMA_ITConfig(motor->dma->ref, DMA_IT_TC, DISABLE);
+            DMA_Cmd(motor->dma->ref, ENABLE);
+            TIM_DMACmd(timer, motor->dmaSource, ENABLE);
         }
 
-        DMA_Cmd(motor->dma->ref, DISABLE);
-        TIM_DMACmd(timer, motor->dmaSource, DISABLE);
-        DMA_DeInit(motor->dma->ref);
-        DMA_Init(motor->dma->ref, &motor->inputDmaInit);
-        DMA_ITConfig(motor->dma->ref, DMA_IT_TC, DISABLE);
-        DMA_Cmd(motor->dma->ref, ENABLE);
-        TIM_DMACmd(timer, motor->dmaSource, ENABLE);
+        timerChCaptureEnable(motor->tch);
     }
 
     dshotBidirCtx.captureStartedUs = micros();
-    dshotBidirCtx.state = DSHOT_BIDIR_STATE_CAPTURING;
 }
 
 static void dshotBidirRestoreReadyState(void)
 {
     if (dshotBidirCtx.timer) {
-        dshotBidirCtx.timer->ARR = DSHOT_BIDIR_OUTPUT_PERIOD;
-        TIM_SetCounter(dshotBidirCtx.timer, 0);
+        dshotBidirApplyTimerPeriod(DSHOT_BIDIR_OUTPUT_PERIOD);
     }
 
+    dshotBidirDisableBurstTimerCallback();
     dshotBidirRestoreBurstDma();
 
     for (uint8_t i = 0; i < DSHOT_BIDIR_MOTOR_LIMIT; i++) {
         dshotBidirRestoreOutputChannel(&dshotBidirMotors[i]);
     }
 
+    dshotBidirCtx.outputCompleteMask = 0;
+    dshotBidirCtx.outputExpectedMask = 0;
+    dshotBidirCtx.outputUpdateCount = 0;
     dshotBidirCtx.state = DSHOT_BIDIR_STATE_READY;
 }
 
@@ -420,8 +578,9 @@ static void dshotBidirStopInputCapture(void)
             continue;
         }
 
+        timerChCaptureDisable(motor->tch);
+
         if (motor->useInterruptCapture) {
-            timerChCaptureDisable(motor->tch);
             timerChConfigCallbacks(motor->tch, (timerCallbacks_t *)&dshotBidirCallbacksDisabled);
             continue;
         }
@@ -457,12 +616,14 @@ static void dshotBidirDecodeCapture(void)
             dshotBidirLastRawValue[i] = 0;
             dshotBidirLastErpmValue[i] = 0;
             dshotBidirLastRpmValue[i] = 0;
+            dshotBidirLatchDecodeTrace(i, DSHOT_BIDIR_DIAG_NOEDGE, NULL, motor->captureBuffer, edgeCount);
             continue;
         }
 
         dshotBidirReadCount++;
         readDelta++;
-        const uint32_t rawValue = dshotBidirDecodeTelemetryPacket(motor->captureBuffer, edgeCount);
+        dshotBidirDecodeTrace_t decodeTrace;
+        const uint32_t rawValue = dshotBidirDecodeTelemetryPacketEx(motor->captureBuffer, edgeCount, &decodeTrace);
         if (rawValue == DSHOT_BIDIR_INVALID) {
             dshotBidirInvalidPacketCount++;
             invalidDelta++;
@@ -470,6 +631,23 @@ static void dshotBidirDecodeCapture(void)
             dshotBidirLastRawValue[i] = 0;
             dshotBidirLastErpmValue[i] = 0;
             dshotBidirLastRpmValue[i] = 0;
+            dshotBidirDiag_e diag = DSHOT_BIDIR_DIAG_EMPTY;
+            switch ((dshotBidirDecodeStatus_e)decodeTrace.status) {
+                case DSHOT_BIDIR_DECODE_STATUS_LENGTH:
+                    diag = DSHOT_BIDIR_DIAG_LENGTH;
+                    break;
+                case DSHOT_BIDIR_DECODE_STATUS_GCR:
+                    diag = DSHOT_BIDIR_DIAG_GCR;
+                    break;
+                case DSHOT_BIDIR_DECODE_STATUS_CHECKSUM:
+                    diag = DSHOT_BIDIR_DIAG_CHECKSUM;
+                    break;
+                case DSHOT_BIDIR_DECODE_STATUS_EMPTY:
+                default:
+                    diag = DSHOT_BIDIR_DIAG_EMPTY;
+                    break;
+            }
+            dshotBidirLatchDecodeTrace(i, diag, &decodeTrace, motor->captureBuffer, edgeCount);
             continue;
         }
 
@@ -481,17 +659,62 @@ static void dshotBidirDecodeCapture(void)
             dshotBidirLastRawValue[i] = (uint16_t)rawValue;
             dshotBidirLastErpmValue[i] = 0;
             dshotBidirLastRpmValue[i] = 0;
+            dshotBidirLatchDecodeTrace(i, DSHOT_BIDIR_DIAG_ERPM, &decodeTrace, motor->captureBuffer, edgeCount);
             continue;
         }
 
-        const uint32_t rpm = dshotBidirComputeRpm(erpm);
+        const uint32_t rpm = dshotBidirComputeRpm(erpm, motorConfig()->motorPoleCount);
         dshotBidirLastRawValue[i] = (uint16_t)rawValue;
         dshotBidirLastErpmValue[i] = erpm;
         dshotBidirLastRpmValue[i] = rpm;
         rpmSourceSetDshotBidirRpm(i, rpm);
+        dshotBidirLatchDecodeTrace(i, DSHOT_BIDIR_DIAG_OK, &decodeTrace, motor->captureBuffer, edgeCount);
     }
 
     dshotBidirUpdateDebug(readDelta, invalidDelta, noEdgeDelta, 0);
+    dshotBidirLatchTrace(DSHOT_BIDIR_EVENT_DECODE_COMPLETE, cmpTimeUs(micros(), dshotBidirCtx.captureStartedUs));
+}
+
+static void dshotBidirOutputDmaCallback(TCH_t *tch)
+{
+    if (dshotBidirCtx.useBurstOutput || dshotBidirCtx.state != DSHOT_BIDIR_STATE_OUTPUT_PENDING) {
+        return;
+    }
+
+    dshotBidirOutputDmaCallbackCount++;
+
+    dshotBidirMotor_t *motor = dshotBidirFindMotorByTch(tch);
+    if (!motor) {
+        return;
+    }
+
+    dshotBidirCtx.outputCompleteMask |= dshotBidirGetMotorBit(motor);
+    if (dshotBidirCtx.outputCompleteMask != dshotBidirCtx.outputExpectedMask) {
+        return;
+    }
+
+    dshotBidirBurstCompleteCount++;
+    dshotBidirLastBurstLatencyUs = cmpTimeUs(micros(), dshotBidirCtx.frameStartedUs);
+    dshotBidirStartInputCapture();
+}
+
+static void dshotBidirBurstTimerOverflowCallback(TCH_t *tch, uint32_t capture)
+{
+    UNUSED(tch);
+    UNUSED(capture);
+
+    if (!dshotBidirCtx.useBurstOutput || dshotBidirCtx.state != DSHOT_BIDIR_STATE_OUTPUT_PENDING) {
+        return;
+    }
+
+    dshotBidirOverflowCallbackCount++;
+    if (++dshotBidirCtx.outputUpdateCount < DSHOT_BIDIR_OUTPUT_COMPLETE_UPDATES) {
+        return;
+    }
+
+    dshotBidirBurstCompleteCount++;
+    dshotBidirLastBurstLatencyUs = cmpTimeUs(micros(), dshotBidirCtx.frameStartedUs);
+    dshotBidirStartInputCapture();
 }
 
 static void dshotBidirBurstDmaHandler(DMA_t descriptor)
@@ -500,13 +723,19 @@ static void dshotBidirBurstDmaHandler(DMA_t descriptor)
         return;
     }
 
+    dshotBidirOutputDmaCallbackCount++;
     DMA_Cmd(descriptor->ref, DISABLE);
-    TIM_DMACmd(dshotBidirCtx.timer, dshotBidirCtx.burstTch->timCtx->DMASource, DISABLE);
+    TIM_DMACmd(dshotBidirCtx.timer, dshotBidirCtx.burstRequestSource, DISABLE);
     DMA_CLEAR_FLAG(descriptor, DMA_IT_TCIF);
 
-    if (dshotBidirCtx.state == DSHOT_BIDIR_STATE_OUTPUT_PENDING) {
-        dshotBidirStartInputCapture();
+    if (!dshotBidirCtx.useBurstOutput || dshotBidirCtx.state != DSHOT_BIDIR_STATE_OUTPUT_PENDING) {
+        return;
     }
+
+    dshotBidirWaitCaptureStartDelay();
+    dshotBidirBurstCompleteCount++;
+    dshotBidirLastBurstLatencyUs = cmpTimeUs(micros(), dshotBidirCtx.frameStartedUs);
+    dshotBidirStartInputCapture();
 }
 
 void dshotBidirInit(uint32_t dshotHz)
@@ -521,14 +750,41 @@ void dshotBidirInit(uint32_t dshotHz)
     dshotBidirInvalidPacketCount = 0;
     dshotBidirNoEdgeCount = 0;
     dshotBidirTimeoutCount = 0;
+    dshotBidirBurstCompleteCount = 0;
+    dshotBidirCaptureStartCount = 0;
+    dshotBidirLastBurstLatencyUs = 0;
+    dshotBidirOverflowCallbackCount = 0;
+    dshotBidirOutputDmaCallbackCount = 0;
+    dshotBidirLastEventElapsedUs = 0;
+    dshotBidirLastEvent = DSHOT_BIDIR_EVENT_NONE;
+    dshotBidirLastOutputUpdateCount = 0;
+    dshotBidirLastOutputExpectedMask = 0;
+    dshotBidirLastOutputCompleteMask = 0;
+    dshotBidirLastTimerArr = 0;
+    dshotBidirLastTimerCnt = 0;
+    dshotBidirLastDecodeMotor = DSHOT_BIDIR_MOTOR_LIMIT;
+    dshotBidirLastDecodeStatus = DSHOT_BIDIR_DIAG_NONE;
+    dshotBidirLastDecodeEdgeCount = 0;
+    dshotBidirLastDecodeGcrValue = 0;
+    dshotBidirLastDecodeWord = 0;
+    memset(dshotBidirLastDecodeDeltas, 0, sizeof(dshotBidirLastDecodeDeltas));
+    memset(dshotBidirMotorReadCount, 0, sizeof(dshotBidirMotorReadCount));
+    memset(dshotBidirMotorInvalidCount, 0, sizeof(dshotBidirMotorInvalidCount));
+    memset(dshotBidirMotorNoEdgeCount, 0, sizeof(dshotBidirMotorNoEdgeCount));
+    memset(dshotBidirMotorIrqEdgeCallbackCount, 0, sizeof(dshotBidirMotorIrqEdgeCallbackCount));
+    memset(dshotBidirMotorLastInterestingDiag, 0, sizeof(dshotBidirMotorLastInterestingDiag));
+    memset(dshotBidirMotorLastInterestingEdgeCount, 0, sizeof(dshotBidirMotorLastInterestingEdgeCount));
+    memset(dshotBidirMotorLastInterestingRawValue, 0, sizeof(dshotBidirMotorLastInterestingRawValue));
+    memset(dshotBidirMotorLastInterestingErpmValue, 0, sizeof(dshotBidirMotorLastInterestingErpmValue));
+    memset(dshotBidirMotorLastInterestingRpmValue, 0, sizeof(dshotBidirMotorLastInterestingRpmValue));
 
-    dshotBidirCtx.captureWindowUs = DSHOT_BIDIR_CAPTURE_DEADTIME_US +
-        (1000000U * (DSHOT_BIDIR_TIMER_BIT_COUNT * DSHOT_BIDIR_TIMER_BIT_LENGTH)) / dshotHz;
+    dshotBidirCtx.outputWindowUs = dshotBidirComputeOutputWindowUs(dshotHz);
+    dshotBidirCtx.captureWindowUs = dshotBidirComputeCaptureWindowUs(dshotHz);
     dshotBidirCtx.state = DSHOT_BIDIR_STATE_READY;
     dshotBidirUpdateDebug(0, 0, 0, 0);
 }
 
-bool dshotBidirAttachMotor(uint8_t motorIndex, TCH_t *tch, void *dmaBurstBuffer)
+bool dshotBidirAttachMotor(uint8_t motorIndex, TCH_t *tch, void *dmaBurstBuffer, void *dmaOutputBuffer)
 {
     if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT || !tch || tch->timHw->tim != TIM4) {
         return false;
@@ -543,13 +799,30 @@ bool dshotBidirAttachMotor(uint8_t motorIndex, TCH_t *tch, void *dmaBurstBuffer)
     motor->irqCallbacks.callbackEdge = dshotBidirIrqCaptureCallback;
 
     if (!motor->useInterruptCapture) {
-        if (motor->dma != tch->timCtx->dmaBurstRef) {
+        if (!dmaOutputBuffer) {
+            return false;
+        }
+
+        if (dmaBurstBuffer && motor->dma != tch->timCtx->dmaBurstRef) {
             if (dmaGetOwner(motor->dma) != OWNER_FREE) {
                 return false;
             }
 
             dmaInit(motor->dma, OWNER_TIMER, motorIndex);
         }
+
+        DMA_StructInit(&motor->outputDmaInit);
+        motor->outputDmaInit.DMA_Channel = dmaGetChannelByTag(tch->timHw->dmaTag);
+        motor->outputDmaInit.DMA_PeripheralBaseAddr = (uint32_t)timerCCR(tch);
+        motor->outputDmaInit.DMA_Memory0BaseAddr = (uint32_t)dmaOutputBuffer;
+        motor->outputDmaInit.DMA_DIR = DMA_DIR_MemoryToPeripheral;
+        motor->outputDmaInit.DMA_BufferSize = DSHOT_BIDIR_OUTPUT_BUFFER_LEN;
+        motor->outputDmaInit.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
+        motor->outputDmaInit.DMA_MemoryInc = DMA_MemoryInc_Enable;
+        motor->outputDmaInit.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Word;
+        motor->outputDmaInit.DMA_MemoryDataSize = DMA_MemoryDataSize_Word;
+        motor->outputDmaInit.DMA_Mode = DMA_Mode_Normal;
+        motor->outputDmaInit.DMA_Priority = DMA_Priority_High;
 
         DMA_StructInit(&motor->inputDmaInit);
         motor->inputDmaInit.DMA_Channel = dmaGetChannelByTag(tch->timHw->dmaTag);
@@ -569,13 +842,17 @@ bool dshotBidirAttachMotor(uint8_t motorIndex, TCH_t *tch, void *dmaBurstBuffer)
         dshotBidirCtx.timer = tch->timHw->tim;
     }
 
-    if (!dshotBidirCtx.burstDma && tch->timCtx->dmaBurstRef && dmaBurstBuffer && motor->dma == tch->timCtx->dmaBurstRef) {
+    if (!dshotBidirCtx.burstDma && tch->timCtx->dmaBurstRef && dmaBurstBuffer) {
         dshotBidirCtx.burstDma = tch->timCtx->dmaBurstRef;
         dshotBidirCtx.burstTch = tch;
         dshotBidirCtx.dmaBurstBuffer = (timerDMASafeType_t *)dmaBurstBuffer;
+        dshotBidirCtx.burstRequestSource = tch->timCtx->DMASource;
+        dshotBidirCtx.statusRequestSource = tch->timCtx->DMASource;
+        dshotBidirCtx.useBurstOutput = true;
+        timerChInitCallbacks(&dshotBidirCtx.burstTimerCallbacks, NULL, NULL, dshotBidirBurstTimerOverflowCallback);
 
         DMA_StructInit(&dshotBidirCtx.burstOutputDmaInit);
-        dshotBidirCtx.burstOutputDmaInit.DMA_Channel = dmaGetChannelByTag(tch->timHw->dmaTag);
+        dshotBidirCtx.burstOutputDmaInit.DMA_Channel = dshotBidirBurstDmaChannel(tch);
         dshotBidirCtx.burstOutputDmaInit.DMA_PeripheralBaseAddr = (uint32_t)&tch->timHw->tim->DMAR;
         dshotBidirCtx.burstOutputDmaInit.DMA_Memory0BaseAddr = (uint32_t)dmaBurstBuffer;
         dshotBidirCtx.burstOutputDmaInit.DMA_DIR = DMA_DIR_MemoryToPeripheral;
@@ -589,13 +866,48 @@ bool dshotBidirAttachMotor(uint8_t motorIndex, TCH_t *tch, void *dmaBurstBuffer)
 
         dmaSetHandler(dshotBidirCtx.burstDma, dshotBidirBurstDmaHandler, NVIC_PRIO_TIMER_DMA, 0);
         dshotBidirCtx.burstHandlerInstalled = true;
+    } else if (!motor->useInterruptCapture && getMotorCount() <= 3) {
+        timerChConfigDmaCallback(motor->tch, dshotBidirOutputDmaCallback);
+        dshotBidirCtx.useBurstOutput = false;
     }
 
     motor->configured = true;
-    dshotBidirConfigureOutputIo(motor);
-    dshotBidirConfigureOutputChannel(motor, 0);
+    dshotBidirConfigureIo(motor);
+
+    TIM_OCStructInit(&motor->outputInit);
+    motor->outputInit.TIM_OCMode = TIM_OCMode_PWM1;
+    if (motor->tch->timHw->output & TIMER_OUTPUT_N_CHANNEL) {
+        motor->outputInit.TIM_OutputState = TIM_OutputState_Disable;
+        motor->outputInit.TIM_OutputNState = TIM_OutputNState_Enable;
+        motor->outputInit.TIM_OCNPolarity = dshotBidirWireOutputInverted(motor) ? TIM_OCPolarity_Low : TIM_OCPolarity_High;
+        motor->outputInit.TIM_OCNIdleState = TIM_OCIdleState_Reset;
+    } else {
+        motor->outputInit.TIM_OutputState = TIM_OutputState_Enable;
+        motor->outputInit.TIM_OutputNState = TIM_OutputNState_Disable;
+        motor->outputInit.TIM_OCPolarity = dshotBidirWireOutputInverted(motor) ? TIM_OCPolarity_Low : TIM_OCPolarity_High;
+        motor->outputInit.TIM_OCIdleState = TIM_OCIdleState_Set;
+    }
+
+    TIM_ICStructInit(&motor->inputCaptureInit);
+    motor->inputCaptureInit.TIM_Channel = dshotBidirTimerChannel(tch->timHw->channelIndex);
+    motor->inputCaptureInit.TIM_ICPolarity = TIM_ICPolarity_BothEdge;
+    motor->inputCaptureInit.TIM_ICSelection = TIM_ICSelection_DirectTI;
+    motor->inputCaptureInit.TIM_ICPrescaler = TIM_ICPSC_DIV1;
+    motor->inputCaptureInit.TIM_ICFilter = DSHOT_BIDIR_CAPTURE_FILTER;
+
+    dshotBidirConfigureOutputChannel(motor, DSHOT_BIDIR_STARTUP_COMPARE_VALUE);
     timerPWMStart(motor->tch);
-    return dshotBidirCtx.burstHandlerInstalled;
+    return true;
+}
+
+bool dshotBidirIsReady(void)
+{
+    return dshotBidirCtx.useBurstOutput ? dshotBidirCtx.burstHandlerInstalled : (dshotBidirCtx.timer != NULL);
+}
+
+bool dshotBidirUsesBurstOutput(void)
+{
+    return dshotBidirCtx.useBurstOutput;
 }
 
 bool dshotBidirUpdate(void)
@@ -603,12 +915,17 @@ bool dshotBidirUpdate(void)
     const timeUs_t now = micros();
 
     if (dshotBidirCtx.state == DSHOT_BIDIR_STATE_OUTPUT_PENDING) {
-        if (cmpTimeUs(now, dshotBidirCtx.frameStartedUs) < (timeDelta_t)dshotBidirCtx.captureWindowUs) {
+        const timeDelta_t elapsed = cmpTimeUs(now, dshotBidirCtx.frameStartedUs);
+        const uint32_t pendingTimeoutUs = (dshotBidirCtx.outputWindowUs * 4U > DSHOT_BIDIR_PENDING_TIMEOUT_US) ?
+            (dshotBidirCtx.outputWindowUs * 4U) :
+            DSHOT_BIDIR_PENDING_TIMEOUT_US;
+
+        if (elapsed < (timeDelta_t)pendingTimeoutUs) {
             return false;
         }
 
         dshotBidirTimeoutCount++;
-        dshotBidirInvalidateAll();
+        dshotBidirLatchTrace(DSHOT_BIDIR_EVENT_TIMEOUT, (uint32_t)elapsed);
         dshotBidirUpdateDebug(0, 0, 0, 1);
         dshotBidirRestoreReadyState();
         return true;
@@ -631,6 +948,25 @@ bool dshotBidirUpdate(void)
 void dshotBidirOnFrameStarted(void)
 {
     dshotBidirCtx.frameStartedUs = micros();
+    dshotBidirCtx.outputCompleteMask = 0;
+    dshotBidirCtx.outputExpectedMask = 0;
+    dshotBidirCtx.outputUpdateCount = 0;
+    if (dshotBidirCtx.useBurstOutput) {
+        if (dshotBidirCtx.burstTch) {
+            timerChConfigCallbacks(dshotBidirCtx.burstTch, &dshotBidirCtx.burstTimerCallbacks);
+        }
+    } else {
+        dshotBidirCtx.statusRequestSource = 0;
+        for (uint8_t i = 0; i < DSHOT_BIDIR_MOTOR_LIMIT; i++) {
+            const dshotBidirMotor_t *motor = &dshotBidirMotors[i];
+            if (!motor->configured) {
+                continue;
+            }
+
+            dshotBidirCtx.outputExpectedMask |= dshotBidirGetMotorBit(motor);
+            dshotBidirCtx.statusRequestSource |= motor->dmaSource;
+        }
+    }
     dshotBidirCtx.state = DSHOT_BIDIR_STATE_OUTPUT_PENDING;
 }
 
@@ -652,6 +988,101 @@ uint32_t dshotBidirGetNoEdgeCount(void)
 uint32_t dshotBidirGetTimeoutCount(void)
 {
     return dshotBidirTimeoutCount;
+}
+
+uint32_t dshotBidirGetBurstCompleteCount(void)
+{
+    return dshotBidirBurstCompleteCount;
+}
+
+uint32_t dshotBidirGetCaptureStartCount(void)
+{
+    return dshotBidirCaptureStartCount;
+}
+
+uint8_t dshotBidirGetState(void)
+{
+    return (uint8_t)dshotBidirCtx.state;
+}
+
+uint16_t dshotBidirGetBurstRequestSource(void)
+{
+    return dshotBidirCtx.burstRequestSource;
+}
+
+uint32_t dshotBidirGetLastBurstLatencyUs(void)
+{
+    return dshotBidirLastBurstLatencyUs;
+}
+
+uint8_t dshotBidirGetLastEvent(void)
+{
+    return dshotBidirLastEvent;
+}
+
+uint32_t dshotBidirGetLastEventElapsedUs(void)
+{
+    return dshotBidirLastEventElapsedUs;
+}
+
+uint32_t dshotBidirGetOverflowCallbackCount(void)
+{
+    return dshotBidirOverflowCallbackCount;
+}
+
+uint32_t dshotBidirGetOutputDmaCallbackCount(void)
+{
+    return dshotBidirOutputDmaCallbackCount;
+}
+
+uint8_t dshotBidirGetLastOutputUpdateCount(void)
+{
+    return dshotBidirLastOutputUpdateCount;
+}
+
+uint8_t dshotBidirGetLastOutputExpectedMask(void)
+{
+    return dshotBidirLastOutputExpectedMask;
+}
+
+uint8_t dshotBidirGetLastOutputCompleteMask(void)
+{
+    return dshotBidirLastOutputCompleteMask;
+}
+
+uint32_t dshotBidirGetLastTimerArr(void)
+{
+    return dshotBidirLastTimerArr;
+}
+
+uint32_t dshotBidirGetLastTimerCnt(void)
+{
+    return dshotBidirLastTimerCnt;
+}
+
+uint8_t dshotBidirGetOutputUpdateCount(void)
+{
+    return dshotBidirCtx.outputUpdateCount;
+}
+
+uint8_t dshotBidirGetOutputExpectedMask(void)
+{
+    return dshotBidirCtx.outputExpectedMask;
+}
+
+uint8_t dshotBidirGetOutputCompleteMask(void)
+{
+    return dshotBidirCtx.outputCompleteMask;
+}
+
+uint32_t dshotBidirGetOutputWindowUs(void)
+{
+    return dshotBidirCtx.outputWindowUs;
+}
+
+uint32_t dshotBidirGetCaptureWindowUs(void)
+{
+    return dshotBidirCtx.captureWindowUs;
 }
 
 uint8_t dshotBidirGetLastEdgeCount(uint8_t motorIndex)
@@ -690,6 +1121,121 @@ uint32_t dshotBidirGetLastRpmValue(uint8_t motorIndex)
     return dshotBidirLastRpmValue[motorIndex];
 }
 
+uint32_t dshotBidirGetMotorReadCount(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorReadCount[motorIndex];
+}
+
+uint32_t dshotBidirGetMotorInvalidCount(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorInvalidCount[motorIndex];
+}
+
+uint32_t dshotBidirGetMotorNoEdgeCount(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorNoEdgeCount[motorIndex];
+}
+
+uint32_t dshotBidirGetMotorIrqEdgeCallbackCount(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorIrqEdgeCallbackCount[motorIndex];
+}
+
+uint8_t dshotBidirGetMotorLastInterestingDiag(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorLastInterestingDiag[motorIndex];
+}
+
+uint8_t dshotBidirGetMotorLastInterestingEdgeCount(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorLastInterestingEdgeCount[motorIndex];
+}
+
+uint16_t dshotBidirGetMotorLastInterestingRawValue(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorLastInterestingRawValue[motorIndex];
+}
+
+uint32_t dshotBidirGetMotorLastInterestingErpmValue(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorLastInterestingErpmValue[motorIndex];
+}
+
+uint32_t dshotBidirGetMotorLastInterestingRpmValue(uint8_t motorIndex)
+{
+    if (motorIndex >= DSHOT_BIDIR_MOTOR_LIMIT) {
+        return 0;
+    }
+
+    return dshotBidirMotorLastInterestingRpmValue[motorIndex];
+}
+
+uint8_t dshotBidirGetLastDecodeMotor(void)
+{
+    return dshotBidirLastDecodeMotor;
+}
+
+uint8_t dshotBidirGetLastDecodeStatus(void)
+{
+    return dshotBidirLastDecodeStatus;
+}
+
+uint8_t dshotBidirGetLastDecodeEdgeCount(void)
+{
+    return dshotBidirLastDecodeEdgeCount;
+}
+
+uint32_t dshotBidirGetLastDecodeGcrValue(void)
+{
+    return dshotBidirLastDecodeGcrValue;
+}
+
+uint16_t dshotBidirGetLastDecodeWord(void)
+{
+    return dshotBidirLastDecodeWord;
+}
+
+uint16_t dshotBidirGetLastDecodeDelta(uint8_t deltaIndex)
+{
+    if (deltaIndex >= ARRAYLEN(dshotBidirLastDecodeDeltas)) {
+        return 0;
+    }
+
+    return dshotBidirLastDecodeDeltas[deltaIndex];
+}
+
 #else
 
 void dshotBidirInit(uint32_t dshotHz)
@@ -697,11 +1243,22 @@ void dshotBidirInit(uint32_t dshotHz)
     UNUSED(dshotHz);
 }
 
-bool dshotBidirAttachMotor(uint8_t motorIndex, TCH_t *tch, void *dmaBurstBuffer)
+bool dshotBidirAttachMotor(uint8_t motorIndex, TCH_t *tch, void *dmaBurstBuffer, void *dmaOutputBuffer)
 {
     UNUSED(motorIndex);
     UNUSED(tch);
     UNUSED(dmaBurstBuffer);
+    UNUSED(dmaOutputBuffer);
+    return false;
+}
+
+bool dshotBidirIsReady(void)
+{
+    return false;
+}
+
+bool dshotBidirUsesBurstOutput(void)
+{
     return false;
 }
 
@@ -734,6 +1291,101 @@ uint32_t dshotBidirGetTimeoutCount(void)
     return 0;
 }
 
+uint32_t dshotBidirGetBurstCompleteCount(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetCaptureStartCount(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetState(void)
+{
+    return 0;
+}
+
+uint16_t dshotBidirGetBurstRequestSource(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetLastBurstLatencyUs(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetLastEvent(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetLastEventElapsedUs(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetOverflowCallbackCount(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetOutputDmaCallbackCount(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetLastOutputUpdateCount(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetLastOutputExpectedMask(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetLastOutputCompleteMask(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetLastTimerArr(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetLastTimerCnt(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetOutputUpdateCount(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetOutputExpectedMask(void)
+{
+    return 0;
+}
+
+uint8_t dshotBidirGetOutputCompleteMask(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetOutputWindowUs(void)
+{
+    return 0;
+}
+
+uint32_t dshotBidirGetCaptureWindowUs(void)
+{
+    return 0;
+}
+
 uint8_t dshotBidirGetLastEdgeCount(uint8_t motorIndex)
 {
     UNUSED(motorIndex);
@@ -753,6 +1405,60 @@ uint32_t dshotBidirGetLastErpmValue(uint8_t motorIndex)
 }
 
 uint32_t dshotBidirGetLastRpmValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint32_t dshotBidirGetMotorReadCount(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint32_t dshotBidirGetMotorInvalidCount(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint32_t dshotBidirGetMotorNoEdgeCount(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint32_t dshotBidirGetMotorIrqEdgeCallbackCount(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint8_t dshotBidirGetMotorLastInterestingDiag(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint8_t dshotBidirGetMotorLastInterestingEdgeCount(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint16_t dshotBidirGetMotorLastInterestingRawValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint32_t dshotBidirGetMotorLastInterestingErpmValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint32_t dshotBidirGetMotorLastInterestingRpmValue(uint8_t motorIndex)
 {
     UNUSED(motorIndex);
     return 0;
