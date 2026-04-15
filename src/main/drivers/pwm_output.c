@@ -68,6 +68,9 @@
 #define DSHOT_COMMAND_INTERVAL_US 10000
 #define DSHOT_COMMAND_QUEUE_LENGTH 8
 #define DHSOT_COMMAND_QUEUE_SIZE   DSHOT_COMMAND_QUEUE_LENGTH * sizeof(dshotCommands_e)
+
+// DShot values 0..47 are commands/disarm. Avoid running experimental bidir DMA on idle boot frames.
+#define DSHOT_BIDIR_MIN_ACTIVE_THROTTLE 48
 #endif
 
 typedef void (*pwmWriteFuncPtr)(uint8_t index, uint16_t value);  // function pointer used to write motors
@@ -429,6 +432,19 @@ bool isDshotBidirModeActive(void)
 #endif
 }
 
+#ifdef USE_DSHOT_BIDIR
+static bool dshotBitbangHasActiveThrottle(int motorCount)
+{
+    for (int index = 0; index < motorCount; index++) {
+        if (motors[index].value >= DSHOT_BIDIR_MIN_ACTIVE_THROTTLE) {
+            return true;
+        }
+    }
+
+    return false;
+}
+#endif
+
 void pwmRequestMotorTelemetry(int motorIndex)
 {
     if (!isMotorProtocolDigital()) {
@@ -513,6 +529,8 @@ void pwmCompleteMotorUpdate(void) {
         return;
     }
 
+    int motorCount = getMotorCount();
+
 #ifdef USE_DSHOT_BIDIR
     const bool dshotBidirActive = isDshotBidirModeActive();
     const bool dshotBidirUsesBurst = dshotBidirActive && !dshotBitbangModeActive && dshotBidirUsesBurstOutput();
@@ -529,7 +547,6 @@ void pwmCompleteMotorUpdate(void) {
     const bool dshotBidirUsesBurst = false;
 #endif
 
-    int motorCount = getMotorCount();
     timeUs_t currentTimeUs = micros();
 
     // Enforce motor update rate
@@ -547,6 +564,14 @@ void pwmCompleteMotorUpdate(void) {
         }
 
         if (dshotBitbangModeActive) {
+            if (!dshotBitbangHasActiveThrottle(motorCount)) {
+                for (int index = 0; index < motorCount; index++) {
+                    motors[index].requestTelemetry = false;
+                }
+
+                return;
+            }
+
             dshotBitbangRuntimeBeginFrame();
             for (int index = 0; index < motorCount; index++) {
                 const bool requestTelemetry = dshotBidirActive || motors[index].requestTelemetry;
