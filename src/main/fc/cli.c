@@ -62,6 +62,7 @@ bool cliMode = false;
 #include "drivers/io_impl.h"
 #include "drivers/osd_symbols.h"
 #include "drivers/persistent.h"
+#include "drivers/pwm_output.h"
 #include "drivers/sdcard/sdcard.h"
 #include "drivers/sensor.h"
 #include "drivers/serial.h"
@@ -4191,7 +4192,10 @@ static void cliStatus(char *cmdline)
             dshotBitbangRuntimeGetInputCallbackCount(),
             (unsigned)dshotBitbangRuntimeGetRequestSource(),
             dshotBitbangRuntimeGetLastLatencyUs());
-        cliPrintLinef("DShot Bidir Trace: mode=bitbang, upd=0, mask=0x00/0x00, win=0/%lu",
+        cliPrintLinef("DShot Bidir Trace: mode=bitbang, gate=%lu, start=%lu, max=%u, samples=%lu",
+            pwmGetDshotBitbangIdleGateCount(),
+            pwmGetDshotBitbangThrottleFrameCount(),
+            (unsigned)pwmGetDshotBitbangLastMaxMotorValue(),
             dshotBitbangRuntimeGetLastSampleCount());
         cliPrintLinef("DShot Bidir Last: event=%s, elapsed=%lu, upd=0, mask=0x00/0x00, timer=0/0, cb=%lu/%lu",
             dshotBitbangDecodeStatusName,

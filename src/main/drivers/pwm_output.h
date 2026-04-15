@@ -46,6 +46,9 @@ void pwmCompleteMotorUpdate(void);
 bool isMotorProtocolDigital(void);
 bool isMotorProtocolDshot(void);
 bool isDshotBidirModeActive(void);
+uint32_t pwmGetDshotBitbangIdleGateCount(void);
+uint32_t pwmGetDshotBitbangThrottleFrameCount(void);
+uint16_t pwmGetDshotBitbangLastMaxMotorValue(void);
 
 void pwmWriteServo(uint8_t index, uint16_t value);
 

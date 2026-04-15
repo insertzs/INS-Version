@@ -123,6 +123,11 @@ static bool pwmMotorsEnabled = true;
 static bool dshotBidirModeActive = false;
 static bool dshotBitbangModeActive = false;
 static uint8_t dshotBidirConfiguredMotorCount = 0;
+#ifdef USE_DSHOT_BIDIR
+static uint32_t dshotBitbangIdleGateCount = 0;
+static uint32_t dshotBitbangThrottleFrameCount = 0;
+static uint16_t dshotBitbangLastMaxMotorValue = 0;
+#endif
 
 #ifdef USE_DSHOT
 static timeUs_t digitalMotorUpdateIntervalUs = 0;
@@ -433,15 +438,49 @@ bool isDshotBidirModeActive(void)
 }
 
 #ifdef USE_DSHOT_BIDIR
+uint32_t pwmGetDshotBitbangIdleGateCount(void)
+{
+    return dshotBitbangIdleGateCount;
+}
+
+uint32_t pwmGetDshotBitbangThrottleFrameCount(void)
+{
+    return dshotBitbangThrottleFrameCount;
+}
+
+uint16_t pwmGetDshotBitbangLastMaxMotorValue(void)
+{
+    return dshotBitbangLastMaxMotorValue;
+}
+
 static bool dshotBitbangHasActiveThrottle(int motorCount)
 {
+    uint16_t maxValue = 0;
+
     for (int index = 0; index < motorCount; index++) {
-        if (motors[index].value >= DSHOT_BIDIR_MIN_ACTIVE_THROTTLE) {
-            return true;
+        if (motors[index].value > maxValue) {
+            maxValue = motors[index].value;
         }
     }
 
-    return false;
+    dshotBitbangLastMaxMotorValue = maxValue;
+
+    return maxValue >= DSHOT_BIDIR_MIN_ACTIVE_THROTTLE;
+}
+#else
+uint32_t pwmGetDshotBitbangIdleGateCount(void)
+{
+    return 0;
+}
+
+uint32_t pwmGetDshotBitbangThrottleFrameCount(void)
+{
+    return 0;
+}
+
+uint16_t pwmGetDshotBitbangLastMaxMotorValue(void)
+{
+    return 0;
 }
 #endif
 
@@ -565,6 +604,9 @@ void pwmCompleteMotorUpdate(void) {
 
         if (dshotBitbangModeActive) {
             if (!dshotBitbangHasActiveThrottle(motorCount)) {
+#ifdef USE_DSHOT_BIDIR
+                dshotBitbangIdleGateCount++;
+#endif
                 for (int index = 0; index < motorCount; index++) {
                     motors[index].requestTelemetry = false;
                 }
@@ -572,6 +614,9 @@ void pwmCompleteMotorUpdate(void) {
                 return;
             }
 
+#ifdef USE_DSHOT_BIDIR
+            dshotBitbangThrottleFrameCount++;
+#endif
             dshotBitbangRuntimeBeginFrame();
             for (int index = 0; index < motorCount; index++) {
                 const bool requestTelemetry = dshotBidirActive || motors[index].requestTelemetry;
@@ -667,6 +712,9 @@ void pwmMotorPreconfigure(void)
         getMotorCount() <= 4;
     dshotBitbangModeActive = false;
     dshotBidirConfiguredMotorCount = 0;
+    dshotBitbangIdleGateCount = 0;
+    dshotBitbangThrottleFrameCount = 0;
+    dshotBitbangLastMaxMotorValue = 0;
 
     if (dshotBidirModeActive && initMotorProtocol == PWM_TYPE_DSHOT600) {
         initMotorProtocol = PWM_TYPE_DSHOT300;
