@@ -30,6 +30,8 @@
 #define DSHOT_BITBANG_MAX_MOTORS 4U
 #define DSHOT_BITBANG_INPUT_BUFFER_LENGTH 140U
 #define DSHOT_BITBANG_TELEMETRY_TIMEOUT_US 2000U
+#define DSHOT_BITBANG_MIN_TIMER_ARR 16U
+
 typedef enum {
     DSHOT_BITBANG_STATE_DISABLED = 0,
     DSHOT_BITBANG_STATE_OUTPUT,
@@ -89,6 +91,26 @@ typedef struct {
 
 static dshotBitbangRuntimeCtx_t dshotBitbangCtx;
 static dshotBitbangMotor_t dshotBitbangMotors[DSHOT_BITBANG_MAX_MOTORS];
+
+static bool dshotBitbangComputeTimerArr(uint32_t timerHz, uint32_t targetHz, uint16_t *arr)
+{
+    if (targetHz == 0U) {
+        return false;
+    }
+
+    const uint32_t period = timerHz / targetHz;
+    if (period == 0U) {
+        return false;
+    }
+
+    const uint32_t candidateArr = period - 1U;
+    if (candidateArr < DSHOT_BITBANG_MIN_TIMER_ARR || candidateArr > 0xffffU) {
+        return false;
+    }
+
+    *arr = (uint16_t)candidateArr;
+    return true;
+}
 
 static uint16_t dshotBitbangPreparePacket(uint16_t value, bool requestTelemetry)
 {
@@ -352,12 +374,18 @@ bool dshotBitbangRuntimeInit(uint32_t dshotSymbolHz)
         return false;
     }
 
+    dshotBitbangCtx.dmaSource = dshotBitbangPacerDmaSource(dshotBitbangCtx.pacerTimHw->channelIndex);
+    const uint32_t pacerTimerHz = timerClock(dshotBitbangCtx.pacerTimHw->tim);
+    if (!dshotBitbangComputeTimerArr(pacerTimerHz, dshotBitbangComputeOutputStateHz(dshotSymbolHz), &dshotBitbangCtx.outputARR)) {
+        return false;
+    }
+
+    if (!dshotBitbangComputeTimerArr(pacerTimerHz, dshotBitbangComputeInputSampleHz(dshotSymbolHz), &dshotBitbangCtx.inputARR)) {
+        return false;
+    }
+
     dmaInit(dshotBitbangCtx.dma, OWNER_DSHOT_BITBANG, 0);
     dmaSetHandler(dshotBitbangCtx.dma, dshotBitbangDmaHandler, NVIC_PRIO_TIMER_DMA, (uint32_t)dshotBitbangCtx.pacerTch);
-
-    dshotBitbangCtx.dmaSource = dshotBitbangPacerDmaSource(dshotBitbangCtx.pacerTimHw->channelIndex);
-    dshotBitbangCtx.outputARR = (uint16_t)(timerClock(dshotBitbangCtx.pacerTimHw->tim) / dshotBitbangComputeOutputStateHz(dshotSymbolHz) - 1U);
-    dshotBitbangCtx.inputARR = (uint16_t)(timerClock(dshotBitbangCtx.pacerTimHw->tim) / dshotBitbangComputeInputSampleHz(dshotSymbolHz) - 1U);
 
     dshotBitbangInitPacerChannel();
     rpmSourceResetDshotBidir();
