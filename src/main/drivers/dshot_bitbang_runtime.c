@@ -328,8 +328,12 @@ static void dshotBitbangDecodeSamples(void)
     dshotBitbangUpdateDebug(readDelta, invalidDelta, noEdgeDelta, 0);
 }
 
-bool dshotBitbangRuntimeInit(uint32_t dshotHz)
+bool dshotBitbangRuntimeInit(uint32_t dshotSymbolHz)
 {
+    if (dshotSymbolHz == 0U) {
+        return false;
+    }
+
     memset(&dshotBitbangCtx, 0, sizeof(dshotBitbangCtx));
     memset(dshotBitbangMotors, 0, sizeof(dshotBitbangMotors));
 
@@ -352,8 +356,8 @@ bool dshotBitbangRuntimeInit(uint32_t dshotHz)
     dmaSetHandler(dshotBitbangCtx.dma, dshotBitbangDmaHandler, NVIC_PRIO_TIMER_DMA, (uint32_t)dshotBitbangCtx.pacerTch);
 
     dshotBitbangCtx.dmaSource = dshotBitbangPacerDmaSource(dshotBitbangCtx.pacerTimHw->channelIndex);
-    dshotBitbangCtx.outputARR = (uint16_t)(timerClock(dshotBitbangCtx.pacerTimHw->tim) / (dshotHz * DSHOT_BITBANG_OUTPUT_STATES_PER_BIT) - 1U);
-    dshotBitbangCtx.inputARR = (uint16_t)(timerClock(dshotBitbangCtx.pacerTimHw->tim) / dshotBitbangComputeInputSampleHz(dshotHz) - 1U);
+    dshotBitbangCtx.outputARR = (uint16_t)(timerClock(dshotBitbangCtx.pacerTimHw->tim) / dshotBitbangComputeOutputStateHz(dshotSymbolHz) - 1U);
+    dshotBitbangCtx.inputARR = (uint16_t)(timerClock(dshotBitbangCtx.pacerTimHw->tim) / dshotBitbangComputeInputSampleHz(dshotSymbolHz) - 1U);
 
     dshotBitbangInitPacerChannel();
     rpmSourceResetDshotBidir();
@@ -498,7 +502,7 @@ void dshotBitbangRuntimeSetMotorValue(uint8_t motorIndex, uint16_t value, bool r
 
 void dshotBitbangRuntimeStartFrame(void)
 {
-    if (!dshotBitbangCtx.initialized) {
+    if (!dshotBitbangRuntimeIsReady()) {
         return;
     }
 

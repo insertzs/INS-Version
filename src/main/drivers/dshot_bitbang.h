@@ -12,5 +12,6 @@
 void dshotBitbangOutputDataInit(uint32_t *buffer, uint16_t portMask, bool inverted);
 void dshotBitbangOutputDataSet(uint32_t *buffer, uint8_t pinIndex, uint16_t packet, bool inverted);
 void dshotBitbangOutputDataClear(uint32_t *buffer);
-uint32_t dshotBitbangComputeFrameTimeUs(uint32_t dshotHz);
-uint32_t dshotBitbangComputeInputSampleHz(uint32_t dshotHz);
+uint32_t dshotBitbangComputeOutputStateHz(uint32_t dshotSymbolHz);
+uint32_t dshotBitbangComputeFrameTimeUs(uint32_t dshotSymbolHz);
+uint32_t dshotBitbangComputeInputSampleHz(uint32_t dshotSymbolHz);

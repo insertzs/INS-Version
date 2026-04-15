@@ -89,9 +89,12 @@ TEST(DshotBitbangUnittest, ClearsOnlyMiddleState)
 
 TEST(DshotBitbangUnittest, ComputesExpectedTimingHelpers)
 {
-    EXPECT_EQ(dshotBitbangComputeFrameTimeUs(6000000U), 8U);
+    EXPECT_EQ(dshotBitbangComputeOutputStateHz(300000U), 900000U);
+    EXPECT_EQ(dshotBitbangComputeOutputStateHz(0U), 0U);
+
+    EXPECT_EQ(dshotBitbangComputeFrameTimeUs(300000U), 56U);
     EXPECT_EQ(dshotBitbangComputeFrameTimeUs(0U), 0U);
 
-    EXPECT_EQ(dshotBitbangComputeInputSampleHz(6000000U), 7500000U);
+    EXPECT_EQ(dshotBitbangComputeInputSampleHz(300000U), 1125000U);
     EXPECT_EQ(dshotBitbangComputeInputSampleHz(0U), 0U);
 }

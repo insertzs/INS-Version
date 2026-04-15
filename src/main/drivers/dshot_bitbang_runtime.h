@@ -13,7 +13,7 @@ typedef enum {
     DSHOT_BITBANG_RUNTIME_DECODE_ERPM,
 } dshotBitbangRuntimeDecodeStatus_e;
 
-bool dshotBitbangRuntimeInit(uint32_t dshotHz);
+bool dshotBitbangRuntimeInit(uint32_t dshotSymbolHz);
 bool dshotBitbangRuntimeConfigureMotor(const timerHardware_t *timerHardware, uint8_t motorIndex, bool enableOutput);
 bool dshotBitbangRuntimeIsActive(void);
 bool dshotBitbangRuntimeIsReady(void);

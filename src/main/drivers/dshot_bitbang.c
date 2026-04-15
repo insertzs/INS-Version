@@ -40,20 +40,25 @@ void dshotBitbangOutputDataClear(uint32_t *buffer)
     }
 }
 
-uint32_t dshotBitbangComputeFrameTimeUs(uint32_t dshotHz)
+uint32_t dshotBitbangComputeOutputStateHz(uint32_t dshotSymbolHz)
 {
-    if (dshotHz == 0U) {
-        return 0;
-    }
-
-    return (1000000U * 17U * DSHOT_BITBANG_OUTPUT_STATES_PER_BIT) / dshotHz;
+    return dshotSymbolHz * DSHOT_BITBANG_OUTPUT_STATES_PER_BIT;
 }
 
-uint32_t dshotBitbangComputeInputSampleHz(uint32_t dshotHz)
+uint32_t dshotBitbangComputeFrameTimeUs(uint32_t dshotSymbolHz)
 {
-    if (dshotHz == 0U) {
+    if (dshotSymbolHz == 0U) {
         return 0;
     }
 
-    return (dshotHz * 5U * 2U * DSHOT_BITBANG_TELEMETRY_OVERSAMPLE) / 24U;
+    return (1000000U * 17U) / dshotSymbolHz;
+}
+
+uint32_t dshotBitbangComputeInputSampleHz(uint32_t dshotSymbolHz)
+{
+    if (dshotSymbolHz == 0U) {
+        return 0;
+    }
+
+    return (dshotBitbangComputeOutputStateHz(dshotSymbolHz) * 5U * 2U * DSHOT_BITBANG_TELEMETRY_OVERSAMPLE) / 24U;
 }

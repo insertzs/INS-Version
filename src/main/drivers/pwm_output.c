@@ -267,6 +267,11 @@ uint32_t getDshotHz(motorPwmProtocolTypes_e pwmProtocolType)
     }
 }
 
+static uint32_t getDshotSymbolHz(motorPwmProtocolTypes_e pwmProtocolType)
+{
+    return getDshotHz(pwmProtocolType) / DSHOT_MOTOR_BITLENGTH;
+}
+
 #ifdef USE_DSHOT_DMAR
 burstDmaTimer_t burstDmaTimers[MAX_DMA_TIMERS];
 uint8_t burstDmaTimersCount = 0;
@@ -643,7 +648,7 @@ void pwmMotorPreconfigure(void)
     }
 
     if (dshotBidirModeActive) {
-        dshotBitbangModeActive = dshotBitbangRuntimeInit(getDshotHz(initMotorProtocol));
+        dshotBitbangModeActive = dshotBitbangRuntimeInit(getDshotSymbolHz(initMotorProtocol));
     }
 
     if (dshotBidirModeActive && !dshotBitbangModeActive) {
