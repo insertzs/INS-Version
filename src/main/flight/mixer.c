@@ -75,8 +75,11 @@ static EXTENDED_FASTRAM int throttleDeadbandHigh = 0;
 static EXTENDED_FASTRAM int throttleRangeMin = 0;
 static EXTENDED_FASTRAM int throttleRangeMax = 0;
 static EXTENDED_FASTRAM int8_t motorYawMultiplier = 1;
+static timeMs_t disarmedMotorTestLastMspUpdateMs = 0;
 
 int motorZeroCommand = 0;
+
+#define DISARMED_MOTOR_TEST_TIMEOUT_MS 500U
 
 PG_REGISTER_WITH_RESET_TEMPLATE(reversibleMotorsConfig_t, reversibleMotorsConfig, PG_REVERSIBLE_MOTORS_CONFIG, 0);
 
@@ -282,6 +285,30 @@ void mixerResetDisarmedMotors(void)
     // set disarmed motor values
     for (int i = 0; i < MAX_SUPPORTED_MOTORS; i++) {
         motor_disarmed[i] = motorZeroCommand;
+    }
+
+    disarmedMotorTestLastMspUpdateMs = 0;
+}
+
+void mixerSetDisarmedMotorValueFromMsp(uint8_t motorIndex, int16_t motorValue)
+{
+    if (motorIndex >= MAX_SUPPORTED_MOTORS) {
+        return;
+    }
+
+    motor_disarmed[motorIndex] = motorValue;
+    disarmedMotorTestLastMspUpdateMs = millis();
+}
+
+static void mixerHandleDisarmedMotorTestTimeout(void)
+{
+    if (ARMING_FLAG(ARMED) || disarmedMotorTestLastMspUpdateMs == 0 || !areMotorsRunning()) {
+        return;
+    }
+
+    const timeMs_t nowMs = millis();
+    if ((timeMs_t)(nowMs - disarmedMotorTestLastMspUpdateMs) > DISARMED_MOTOR_TEST_TIMEOUT_MS) {
+        mixerResetDisarmedMotors();
     }
 }
 #if !defined(SITL_BUILD)
@@ -508,6 +535,8 @@ static int getReversibleMotorsThrottleDeadband(void)
 
 void FAST_CODE mixTable(void)
 {
+    mixerHandleDisarmedMotorTestTimeout();
+
 #ifdef USE_DSHOT
     if (FLIGHT_MODE(TURTLE_MODE)) {
         applyTurtleModeToMotors();

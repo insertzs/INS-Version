@@ -121,6 +121,7 @@ void writeAllMotors(int16_t mc);
 void mixerInit(void);
 void mixerUpdateStateFlags(void);
 void mixerResetDisarmedMotors(void);
+void mixerSetDisarmedMotorValueFromMsp(uint8_t motorIndex, int16_t motorValue);
 void mixTable(void);
 void writeMotors(void);
 void processServoAutotrim(const float dT);

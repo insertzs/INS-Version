@@ -2307,7 +2307,7 @@ static mspResult_e mspFcProcessInCommand(uint16_t cmdMSP, sbuf_t *src)
             for (int i = 0; i < 8; i++) {
                 const int16_t disarmed = sbufReadU16(src);
                 if (i < MAX_SUPPORTED_MOTORS) {
-                    motor_disarmed[i] = disarmed;
+                    mixerSetDisarmedMotorValueFromMsp(i, disarmed);
                 }
             }
         } else
