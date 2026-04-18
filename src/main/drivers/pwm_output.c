@@ -73,6 +73,7 @@
 
 // DShot values 0..47 are commands/disarm. Avoid running experimental bidir DMA on idle boot frames.
 #define DSHOT_BIDIR_MIN_ACTIVE_THROTTLE 48
+#define DSHOT_BITBANG_DISARMED_UPDATE_INTERVAL_US 2000
 #endif
 
 typedef void (*pwmWriteFuncPtr)(uint8_t index, uint16_t value);  // function pointer used to write motors
@@ -691,8 +692,15 @@ void pwmCompleteMotorUpdate(void) {
 
     timeUs_t currentTimeUs = micros();
 
+    timeUs_t activeMotorUpdateIntervalUs = digitalMotorUpdateIntervalUs;
+#ifdef USE_DSHOT_BIDIR
+    if (dshotBitbangModeActive && !ARMING_FLAG(ARMED)) {
+        activeMotorUpdateIntervalUs = MAX(activeMotorUpdateIntervalUs, (timeUs_t)DSHOT_BITBANG_DISARMED_UPDATE_INTERVAL_US);
+    }
+#endif
+
     // Enforce motor update rate
-    if ((digitalMotorUpdateIntervalUs == 0) || ((currentTimeUs - digitalMotorLastUpdateUs) <= digitalMotorUpdateIntervalUs)) {
+    if ((activeMotorUpdateIntervalUs == 0) || ((currentTimeUs - digitalMotorLastUpdateUs) <= activeMotorUpdateIntervalUs)) {
         return;
     }
 
