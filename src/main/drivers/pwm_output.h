@@ -51,6 +51,9 @@ uint32_t pwmGetDshotBitbangThrottleFrameCount(void);
 uint16_t pwmGetDshotBitbangLastMaxMotorValue(void);
 uint16_t pwmGetDshotBitbangSourceMotorValue(uint8_t motorIndex);
 uint16_t pwmGetDshotBitbangCachedMotorValue(uint8_t motorIndex);
+uint16_t pwmGetDshotBitbangPeakDisarmedMotorValue(uint8_t motorIndex);
+uint16_t pwmGetDshotBitbangPeakSourceMotorValue(uint8_t motorIndex);
+uint16_t pwmGetDshotBitbangPeakCachedMotorValue(uint8_t motorIndex);
 
 void pwmWriteServo(uint8_t index, uint16_t value);
 

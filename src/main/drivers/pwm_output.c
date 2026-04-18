@@ -129,6 +129,9 @@ static uint8_t dshotBidirConfiguredMotorCount = 0;
 static uint32_t dshotBitbangIdleGateCount = 0;
 static uint32_t dshotBitbangThrottleFrameCount = 0;
 static uint16_t dshotBitbangLastMaxMotorValue = 0;
+static uint16_t dshotBitbangPeakDisarmedMotorValue[MAX_MOTORS];
+static uint16_t dshotBitbangPeakSourceMotorValue[MAX_MOTORS];
+static uint16_t dshotBitbangPeakCachedMotorValue[MAX_MOTORS];
 #endif
 
 #ifdef USE_DSHOT
@@ -482,14 +485,54 @@ uint16_t pwmGetDshotBitbangCachedMotorValue(uint8_t motorIndex)
     return motors[motorIndex].value;
 }
 
+uint16_t pwmGetDshotBitbangPeakDisarmedMotorValue(uint8_t motorIndex)
+{
+    if (motorIndex >= MAX_MOTORS) {
+        return 0;
+    }
+
+    return dshotBitbangPeakDisarmedMotorValue[motorIndex];
+}
+
+uint16_t pwmGetDshotBitbangPeakSourceMotorValue(uint8_t motorIndex)
+{
+    if (motorIndex >= MAX_MOTORS) {
+        return 0;
+    }
+
+    return dshotBitbangPeakSourceMotorValue[motorIndex];
+}
+
+uint16_t pwmGetDshotBitbangPeakCachedMotorValue(uint8_t motorIndex)
+{
+    if (motorIndex >= MAX_MOTORS) {
+        return 0;
+    }
+
+    return dshotBitbangPeakCachedMotorValue[motorIndex];
+}
+
 static bool dshotBitbangHasActiveThrottle(int motorCount)
 {
     uint16_t maxValue = 0;
 
     for (int index = 0; index < motorCount; index++) {
-        const uint16_t motorValue = dshotBitbangGetMotorValue(index);
-        if (motorValue > maxValue) {
-            maxValue = motorValue;
+        const uint16_t currentDisarmedValue = !ARMING_FLAG(ARMED) ? (uint16_t)motor_disarmed[index] : 0;
+        const uint16_t currentSourceValue = dshotBitbangGetMotorValue(index);
+        const uint16_t currentCachedValue = motors[index].value;
+
+        if (currentDisarmedValue > dshotBitbangPeakDisarmedMotorValue[index]) {
+            dshotBitbangPeakDisarmedMotorValue[index] = currentDisarmedValue;
+        }
+        if (currentSourceValue > dshotBitbangPeakSourceMotorValue[index]) {
+            dshotBitbangPeakSourceMotorValue[index] = currentSourceValue;
+        }
+        if (currentCachedValue > dshotBitbangPeakCachedMotorValue[index]) {
+            dshotBitbangPeakCachedMotorValue[index] = currentCachedValue;
+        }
+
+        if (currentSourceValue > maxValue) {
+            maxValue = currentSourceValue;
         }
     }
 
@@ -520,6 +563,24 @@ uint16_t pwmGetDshotBitbangSourceMotorValue(uint8_t motorIndex)
 }
 
 uint16_t pwmGetDshotBitbangCachedMotorValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint16_t pwmGetDshotBitbangPeakDisarmedMotorValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint16_t pwmGetDshotBitbangPeakSourceMotorValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint16_t pwmGetDshotBitbangPeakCachedMotorValue(uint8_t motorIndex)
 {
     UNUSED(motorIndex);
     return 0;
@@ -757,6 +818,9 @@ void pwmMotorPreconfigure(void)
     dshotBitbangIdleGateCount = 0;
     dshotBitbangThrottleFrameCount = 0;
     dshotBitbangLastMaxMotorValue = 0;
+    memset(dshotBitbangPeakDisarmedMotorValue, 0, sizeof(dshotBitbangPeakDisarmedMotorValue));
+    memset(dshotBitbangPeakSourceMotorValue, 0, sizeof(dshotBitbangPeakSourceMotorValue));
+    memset(dshotBitbangPeakCachedMotorValue, 0, sizeof(dshotBitbangPeakCachedMotorValue));
 
     if (dshotBidirModeActive && initMotorProtocol == PWM_TYPE_DSHOT600) {
         initMotorProtocol = PWM_TYPE_DSHOT300;
