@@ -115,6 +115,25 @@ int getThrottleIdleValue(void)
     return throttleIdleValue;
 }
 
+uint16_t convertMotorExternalToDigital(uint16_t externalValue)
+{
+#ifdef USE_DSHOT
+    if (feature(FEATURE_REVERSIBLE_MOTORS)) {
+        if (externalValue == PWM_RANGE_MIDDLE) {
+            return DSHOT_DISARM_COMMAND;
+        } else if (externalValue < PWM_RANGE_MIDDLE) {
+            return scaleRangef(externalValue, PWM_RANGE_MIN, PWM_RANGE_MIDDLE - 1, DSHOT_3D_DEADBAND_LOW - 1, DSHOT_MIN_THROTTLE);
+        } else {
+            return scaleRangef(externalValue, PWM_RANGE_MIDDLE + 1, PWM_RANGE_MAX, DSHOT_3D_DEADBAND_HIGH, DSHOT_MAX_THROTTLE);
+        }
+    }
+
+    return (externalValue <= PWM_RANGE_MIN) ? DSHOT_DISARM_COMMAND : scaleRangef(externalValue, PWM_RANGE_MIN + 1, PWM_RANGE_MAX, DSHOT_MIN_THROTTLE, DSHOT_MAX_THROTTLE);
+#else
+    return externalValue;
+#endif
+}
+
 static void computeMotorCount(void)
 {
     static bool firstRun = true;

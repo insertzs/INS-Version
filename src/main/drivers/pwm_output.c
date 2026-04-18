@@ -45,6 +45,8 @@
 #include "fc/config.h"
 #include "fc/runtime_config.h"
 
+#include "flight/mixer.h"
+
 #include "drivers/timer_impl.h"
 #include "drivers/timer.h"
 
@@ -438,6 +440,15 @@ bool isDshotBidirModeActive(void)
 }
 
 #ifdef USE_DSHOT_BIDIR
+static uint16_t dshotBitbangGetMotorValue(int motorIndex)
+{
+    if (!ARMING_FLAG(ARMED) && areMotorsRunning()) {
+        return convertMotorExternalToDigital((uint16_t)motor[motorIndex]);
+    }
+
+    return motors[motorIndex].value;
+}
+
 uint32_t pwmGetDshotBitbangIdleGateCount(void)
 {
     return dshotBitbangIdleGateCount;
@@ -458,8 +469,9 @@ static bool dshotBitbangHasActiveThrottle(int motorCount)
     uint16_t maxValue = 0;
 
     for (int index = 0; index < motorCount; index++) {
-        if (motors[index].value > maxValue) {
-            maxValue = motors[index].value;
+        const uint16_t motorValue = dshotBitbangGetMotorValue(index);
+        if (motorValue > maxValue) {
+            maxValue = motorValue;
         }
     }
 
@@ -620,7 +632,7 @@ void pwmCompleteMotorUpdate(void) {
             dshotBitbangRuntimeBeginFrame();
             for (int index = 0; index < motorCount; index++) {
                 const bool requestTelemetry = dshotBidirActive || motors[index].requestTelemetry;
-                dshotBitbangRuntimeSetMotorValue(index, motors[index].value, requestTelemetry);
+                dshotBitbangRuntimeSetMotorValue(index, dshotBitbangGetMotorValue(index), requestTelemetry);
                 motors[index].requestTelemetry = false;
             }
 

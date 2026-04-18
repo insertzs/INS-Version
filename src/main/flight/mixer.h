@@ -115,6 +115,7 @@ uint8_t getMotorCount(void);
 float getMotorMixRange(void);
 bool mixerIsOutputSaturated(void);
 motorStatus_e getMotorStatus(void);
+uint16_t convertMotorExternalToDigital(uint16_t externalValue);
 
 void writeAllMotors(int16_t mc);
 void mixerInit(void);
