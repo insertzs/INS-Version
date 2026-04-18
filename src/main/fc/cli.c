@@ -4197,6 +4197,9 @@ static void cliStatus(char *cmdline)
             pwmGetDshotBitbangThrottleFrameCount(),
             (unsigned)pwmGetDshotBitbangLastMaxMotorValue(),
             dshotBitbangRuntimeGetLastSampleCount());
+        cliPrintLinef("DShot Bidir Frames: output=%lu, telem=%lu",
+            dshotBitbangRuntimeGetOutputOnlyFrameCount(),
+            dshotBitbangRuntimeGetTelemetryFrameCount());
         cliPrintLinef("DShot Bidir Source: disarmed=%d/%d/%d/%d, source=%u/%u/%u/%u, cached=%u/%u/%u/%u",
             motor_disarmed[0],
             motor_disarmed[1],

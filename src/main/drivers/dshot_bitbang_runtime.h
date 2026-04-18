@@ -30,6 +30,8 @@ uint32_t dshotBitbangRuntimeGetNoEdgeCount(void);
 uint32_t dshotBitbangRuntimeGetTimeoutCount(void);
 uint32_t dshotBitbangRuntimeGetOutputCallbackCount(void);
 uint32_t dshotBitbangRuntimeGetInputCallbackCount(void);
+uint32_t dshotBitbangRuntimeGetOutputOnlyFrameCount(void);
+uint32_t dshotBitbangRuntimeGetTelemetryFrameCount(void);
 uint32_t dshotBitbangRuntimeGetLastLatencyUs(void);
 uint32_t dshotBitbangRuntimeGetLastSampleCount(void);
 uint32_t dshotBitbangRuntimeGetLastRawValue(uint8_t motorIndex);

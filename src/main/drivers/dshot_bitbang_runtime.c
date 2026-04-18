@@ -83,10 +83,13 @@ typedef struct {
     uint32_t motorNoEdgeCount[DSHOT_BITBANG_MAX_MOTORS];
     uint32_t outputCallbackCount;
     uint32_t inputCallbackCount;
+    uint32_t outputOnlyFrameCount;
+    uint32_t telemetryFrameCount;
     uint32_t lastLatencyUs;
     uint32_t lastSampleCount;
     uint8_t lastDecodeMotor;
     uint8_t lastDecodeStatus;
+    bool frameRequestsTelemetry;
 } dshotBitbangRuntimeCtx_t;
 
 static dshotBitbangRuntimeCtx_t dshotBitbangCtx;
@@ -221,10 +224,18 @@ static void dshotBitbangDmaHandler(DMA_t descriptor)
 
     if (dshotBitbangCtx.state == DSHOT_BITBANG_STATE_OUTPUT) {
         dshotBitbangCtx.outputCallbackCount++;
-        dshotBitbangSwitchToInput();
-        dshotBitbangCtx.telemetryPending = true;
         dshotBitbangCtx.lastLatencyUs = micros() - dshotBitbangCtx.frameStartedUs;
-        TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, ENABLE);
+
+        if (dshotBitbangCtx.frameRequestsTelemetry) {
+            dshotBitbangCtx.telemetryFrameCount++;
+            dshotBitbangSwitchToInput();
+            dshotBitbangCtx.telemetryPending = true;
+            TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, ENABLE);
+        } else {
+            dshotBitbangCtx.outputOnlyFrameCount++;
+            dshotBitbangCtx.telemetryPending = false;
+            dshotBitbangCtx.state = DSHOT_BITBANG_STATE_OUTPUT;
+        }
     } else if (dshotBitbangCtx.state == DSHOT_BITBANG_STATE_INPUT) {
         dshotBitbangCtx.inputCallbackCount++;
         dshotBitbangCtx.telemetryPending = false;
@@ -516,6 +527,7 @@ void dshotBitbangRuntimeBeginFrame(void)
     }
 
     dshotBitbangOutputDataClear(dshotBitbangCtx.outputBuffer);
+    dshotBitbangCtx.frameRequestsTelemetry = false;
 }
 
 void dshotBitbangRuntimeSetMotorValue(uint8_t motorIndex, uint16_t value, bool requestTelemetry)
@@ -526,6 +538,7 @@ void dshotBitbangRuntimeSetMotorValue(uint8_t motorIndex, uint16_t value, bool r
 
     const uint16_t packet = dshotBitbangPreparePacket(value, requestTelemetry);
     dshotBitbangOutputDataSet(dshotBitbangCtx.outputBuffer, dshotBitbangMotors[motorIndex].pinIndex, packet, true);
+    dshotBitbangCtx.frameRequestsTelemetry |= requestTelemetry;
 }
 
 void dshotBitbangRuntimeStartFrame(void)
@@ -593,6 +606,16 @@ uint32_t dshotBitbangRuntimeGetOutputCallbackCount(void)
 uint32_t dshotBitbangRuntimeGetInputCallbackCount(void)
 {
     return dshotBitbangCtx.inputCallbackCount;
+}
+
+uint32_t dshotBitbangRuntimeGetOutputOnlyFrameCount(void)
+{
+    return dshotBitbangCtx.outputOnlyFrameCount;
+}
+
+uint32_t dshotBitbangRuntimeGetTelemetryFrameCount(void)
+{
+    return dshotBitbangCtx.telemetryFrameCount;
 }
 
 uint32_t dshotBitbangRuntimeGetLastLatencyUs(void)
@@ -735,6 +758,16 @@ uint32_t dshotBitbangRuntimeGetOutputCallbackCount(void)
 }
 
 uint32_t dshotBitbangRuntimeGetInputCallbackCount(void)
+{
+    return 0;
+}
+
+uint32_t dshotBitbangRuntimeGetOutputOnlyFrameCount(void)
+{
+    return 0;
+}
+
+uint32_t dshotBitbangRuntimeGetTelemetryFrameCount(void)
 {
     return 0;
 }

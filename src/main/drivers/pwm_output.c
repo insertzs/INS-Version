@@ -722,7 +722,7 @@ void pwmCompleteMotorUpdate(void) {
 #endif
             dshotBitbangRuntimeBeginFrame();
             for (int index = 0; index < motorCount; index++) {
-                const bool requestTelemetry = dshotBidirActive || motors[index].requestTelemetry;
+                const bool requestTelemetry = ARMING_FLAG(ARMED) && (dshotBidirActive || motors[index].requestTelemetry);
                 dshotBitbangRuntimeSetMotorValue(index, dshotBitbangGetMotorValue(index), requestTelemetry);
                 motors[index].requestTelemetry = false;
             }
