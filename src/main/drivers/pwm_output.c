@@ -442,8 +442,8 @@ bool isDshotBidirModeActive(void)
 #ifdef USE_DSHOT_BIDIR
 static uint16_t dshotBitbangGetMotorValue(int motorIndex)
 {
-    if (!ARMING_FLAG(ARMED) && areMotorsRunning()) {
-        return convertMotorExternalToDigital((uint16_t)motor[motorIndex]);
+    if (!ARMING_FLAG(ARMED)) {
+        return convertMotorExternalToDigital((uint16_t)motor_disarmed[motorIndex]);
     }
 
     return motors[motorIndex].value;
@@ -462,6 +462,24 @@ uint32_t pwmGetDshotBitbangThrottleFrameCount(void)
 uint16_t pwmGetDshotBitbangLastMaxMotorValue(void)
 {
     return dshotBitbangLastMaxMotorValue;
+}
+
+uint16_t pwmGetDshotBitbangSourceMotorValue(uint8_t motorIndex)
+{
+    if (motorIndex >= MAX_MOTORS) {
+        return 0;
+    }
+
+    return dshotBitbangGetMotorValue(motorIndex);
+}
+
+uint16_t pwmGetDshotBitbangCachedMotorValue(uint8_t motorIndex)
+{
+    if (motorIndex >= MAX_MOTORS) {
+        return 0;
+    }
+
+    return motors[motorIndex].value;
 }
 
 static bool dshotBitbangHasActiveThrottle(int motorCount)
@@ -492,6 +510,18 @@ uint32_t pwmGetDshotBitbangThrottleFrameCount(void)
 
 uint16_t pwmGetDshotBitbangLastMaxMotorValue(void)
 {
+    return 0;
+}
+
+uint16_t pwmGetDshotBitbangSourceMotorValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
+    return 0;
+}
+
+uint16_t pwmGetDshotBitbangCachedMotorValue(uint8_t motorIndex)
+{
+    UNUSED(motorIndex);
     return 0;
 }
 #endif

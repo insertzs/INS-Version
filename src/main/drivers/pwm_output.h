@@ -49,6 +49,8 @@ bool isDshotBidirModeActive(void);
 uint32_t pwmGetDshotBitbangIdleGateCount(void);
 uint32_t pwmGetDshotBitbangThrottleFrameCount(void);
 uint16_t pwmGetDshotBitbangLastMaxMotorValue(void);
+uint16_t pwmGetDshotBitbangSourceMotorValue(uint8_t motorIndex);
+uint16_t pwmGetDshotBitbangCachedMotorValue(uint8_t motorIndex);
 
 void pwmWriteServo(uint8_t index, uint16_t value);
 
