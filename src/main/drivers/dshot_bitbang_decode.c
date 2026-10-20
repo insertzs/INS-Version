@@ -1,14 +1,9 @@
-#include "platform.h"
-
-#include "common/maths.h"
+#include <stddef.h>
 
 #include "drivers/dshot_bitbang_decode.h"
-#include "drivers/time.h"
 
 #define DSHOT_BITBANG_MIN_VALID_SAMPLES 57U
 #define DSHOT_BITBANG_MAX_VALID_SAMPLES 69U
-#define DSHOT_BITBANG_MARGIN_CHECK_INTERVAL_US 500000U
-#define DSHOT_BITBANG_START_MARGIN 5U
 
 static uint32_t dshotBitbangDecodeValue(uint32_t value)
 {
@@ -52,11 +47,11 @@ static uint32_t dshotBitbangDecodeValue(uint32_t value)
 
 uint32_t dshotBitbangDecodeTelemetry(uint16_t buffer[], uint32_t count, uint32_t bit)
 {
-    static uint32_t minMargin = UINT32_MAX;
-    static timeUs_t nextMarginCheckUs = 0;
-    static uint8_t preambleSkip = 0;
-
-    timeUs_t now = micros();
+    // A timed-out DMA may have produced fewer samples than one packet. Check
+    // before subtracting from count or constructing any pointers.
+    if (!buffer || count < DSHOT_BITBANG_MIN_VALID_SAMPLES || bit >= 16U) {
+        return DSHOT_BITBANG_DECODE_NOEDGE;
+    }
     const uint32_t mask = 1U << bit;
     uint16_t lastValue = 0;
     uint32_t value = 0;
@@ -64,13 +59,8 @@ uint32_t dshotBitbangDecodeTelemetry(uint16_t buffer[], uint32_t count, uint32_t
     uint16_t *p = buffer;
     uint16_t *endP = p + count - DSHOT_BITBANG_MIN_VALID_SAMPLES;
 
-    p += preambleSkip;
-
     while (p < endP) {
-        if (!(*p++ & mask) ||
-            !(*p++ & mask) ||
-            !(*p++ & mask) ||
-            !(*p++ & mask)) {
+        if (!(*p++ & mask)) {
             break;
         }
     }
@@ -78,24 +68,23 @@ uint32_t dshotBitbangDecodeTelemetry(uint16_t buffer[], uint32_t count, uint32_t
     const uint32_t startMargin = (uint32_t)(p - buffer);
 
     if (p >= endP) {
-        if (preambleSkip > 0) {
-            preambleSkip--;
-        }
         return DSHOT_BITBANG_DECODE_NOEDGE;
     }
 
-    const int remaining = MIN((int)(count - startMargin), (int)DSHOT_BITBANG_MAX_VALID_SAMPLES);
+    const uint32_t available = count - startMargin;
+    const uint32_t remaining = available < DSHOT_BITBANG_MAX_VALID_SAMPLES ? available : DSHOT_BITBANG_MAX_VALID_SAMPLES;
     uint16_t *oldP = p;
     uint32_t bits = 0;
     endP = p + remaining;
 
     while (endP > p) {
-        if (((*p++ & mask) != lastValue) ||
-            ((*p++ & mask) != lastValue) ||
-            ((*p++ & mask) != lastValue) ||
-            ((*p++ & mask) != lastValue)) {
+        if ((*p++ & mask) != lastValue) {
             if (endP > p) {
-                const int len = MAX((int)((p - oldP + 1) / 3), 1);
+                const int roundedLen = (int)((p - oldP + 1) / 3);
+                const int len = roundedLen > 0 ? roundedLen : 1;
+                if (bits + (uint32_t)len > 21U) {
+                    return DSHOT_BITBANG_DECODE_INVALID;
+                }
                 bits += (uint32_t)len;
                 value <<= len;
                 value |= 1U << (len - 1);
@@ -112,16 +101,6 @@ uint32_t dshotBitbangDecodeTelemetry(uint16_t buffer[], uint32_t count, uint32_t
     const int trailingLen = 21 - (int)bits;
     if (trailingLen < 0) {
         return DSHOT_BITBANG_DECODE_NOEDGE;
-    }
-
-    if (startMargin < minMargin) {
-        minMargin = startMargin;
-    }
-
-    if (cmpTimeUs(now, nextMarginCheckUs) >= 0) {
-        nextMarginCheckUs = now + DSHOT_BITBANG_MARGIN_CHECK_INTERVAL_US;
-        preambleSkip = (minMargin > DSHOT_BITBANG_START_MARGIN) ? (uint8_t)(minMargin - DSHOT_BITBANG_START_MARGIN) : 0;
-        minMargin = UINT32_MAX;
     }
 
     if (trailingLen > 0) {

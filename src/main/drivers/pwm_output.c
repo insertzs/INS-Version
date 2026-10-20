@@ -71,7 +71,7 @@
 #define DSHOT_COMMAND_QUEUE_LENGTH 8
 #define DHSOT_COMMAND_QUEUE_SIZE   DSHOT_COMMAND_QUEUE_LENGTH * sizeof(dshotCommands_e)
 
-// DShot values 0..47 are commands/disarm. Avoid running experimental bidir DMA on idle boot frames.
+// DShot values 0..47 are commands/disarm; zero frames must still reach the ESC.
 #define DSHOT_BIDIR_MIN_ACTIVE_THROTTLE 48
 #define DSHOT_BITBANG_DISARMED_UPDATE_INTERVAL_US 2000
 #endif
@@ -718,20 +718,19 @@ void pwmCompleteMotorUpdate(void) {
 #ifdef USE_DSHOT_BIDIR
                 dshotBitbangIdleGateCount++;
 #endif
-                for (int index = 0; index < motorCount; index++) {
-                    motors[index].requestTelemetry = false;
-                }
-
-                return;
-            }
-
+            } else {
 #ifdef USE_DSHOT_BIDIR
-            dshotBitbangThrottleFrameCount++;
+                dshotBitbangThrottleFrameCount++;
 #endif
+            }
             dshotBitbangRuntimeBeginFrame();
             for (int index = 0; index < motorCount; index++) {
-                const bool requestTelemetry = ARMING_FLAG(ARMED) && (dshotBidirActive || motors[index].requestTelemetry);
-                dshotBitbangRuntimeSetMotorValue(index, dshotBitbangGetMotorValue(index), requestTelemetry);
+                // The packet bit requests separate ESC telemetry/command acknowledgement.
+                // Bidirectional eRPM replies are selected by the inverted checksum.
+                const bool commandActive = currentExecutingCommand.remainingRepeats > 0 ||
+                    (motors[index].requestTelemetry && motors[index].value < DSHOT_BIDIR_MIN_ACTIVE_THROTTLE);
+                const uint16_t value = commandActive ? motors[index].value : dshotBitbangGetMotorValue(index);
+                dshotBitbangRuntimeSetMotorValue(index, value, motors[index].requestTelemetry);
                 motors[index].requestTelemetry = false;
             }
 

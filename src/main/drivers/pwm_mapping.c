@@ -98,6 +98,16 @@ static bool checkPwmTimerConflicts(const timerHardware_t *timHw)
 {
     serialPortPins_t uartPins;
 
+#if defined(USE_DSHOT_BIDIR) && defined(STM32F4)
+    // The target-specific GPIO DShot transport uses TIM1 as its DMA pacer.
+    // Do not let a servo on S9 silently reprogram that timer after motor init.
+    if (motorConfig()->dshotBidirEnabled &&
+        getMotorProtocolProperties(motorConfig()->motorPwmProtocol)->isDSHOT &&
+        getMotorCount() > 0 && getMotorCount() <= 4 && timHw->tim == TIM1) {
+        return true;
+    }
+#endif
+
 #if defined(USE_UART2)
     uartGetPortPins(UARTDEV_2, &uartPins);
     if (doesConfigurationUsePort(SERIAL_PORT_USART2) && (timHw->tag == uartPins.txPin || timHw->tag == uartPins.rxPin)) {

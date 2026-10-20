@@ -61,8 +61,9 @@ typedef struct {
     uint32_t gpioIdleBSRR;
     uint16_t outputARR;
     uint16_t inputARR;
-    dshotBitbangState_e state;
-    bool telemetryPending;
+    volatile dshotBitbangState_e state;
+    volatile bool telemetryPending;
+    volatile bool outputPending;
     timeUs_t frameStartedUs;
     timeUs_t captureStartedUs;
 
@@ -89,7 +90,6 @@ typedef struct {
     uint32_t lastSampleCount;
     uint8_t lastDecodeMotor;
     uint8_t lastDecodeStatus;
-    bool frameRequestsTelemetry;
 } dshotBitbangRuntimeCtx_t;
 
 static dshotBitbangRuntimeCtx_t dshotBitbangCtx;
@@ -175,7 +175,7 @@ static void dshotBitbangApplyDmaConfig(const DMA_InitTypeDef *init)
     DMA_Cmd(dshotBitbangCtx.dma->ref, DISABLE);
     DMA_DeInit(dshotBitbangCtx.dma->ref);
     DMA_Init(dshotBitbangCtx.dma->ref, (DMA_InitTypeDef *)init);
-    DMA_ITConfig(dshotBitbangCtx.dma->ref, DMA_IT_TC, ENABLE);
+    DMA_ITConfig(dshotBitbangCtx.dma->ref, DMA_IT_TC | DMA_IT_TE | DMA_IT_DME | DMA_IT_FE, ENABLE);
     DMA_CLEAR_FLAG(dshotBitbangCtx.dma, DMA_IT_TCIF | DMA_IT_TEIF | DMA_IT_DMEIF | DMA_IT_FEIF);
 }
 
@@ -214,6 +214,17 @@ static void dshotBitbangSwitchToInput(void)
 
 static void dshotBitbangDmaHandler(DMA_t descriptor)
 {
+    if (DMA_GET_FLAG_STATUS(descriptor, DMA_IT_TEIF | DMA_IT_DMEIF | DMA_IT_FEIF)) {
+        // Never leave an asserted error interrupt spinning above USB/MSP priority.
+        TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, DISABLE);
+        DMA_Cmd(descriptor->ref, DISABLE);
+        DMA_CLEAR_FLAG(descriptor, DMA_IT_TCIF | DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_DMEIF | DMA_IT_FEIF);
+        dshotBitbangCtx.timeoutCount++;
+        dshotBitbangCtx.telemetryPending = false;
+        dshotBitbangCtx.outputPending = false;
+        dshotBitbangCtx.state = DSHOT_BITBANG_STATE_DISABLED;
+        return;
+    }
     if (!DMA_GET_FLAG_STATUS(descriptor, DMA_IT_TCIF)) {
         return;
     }
@@ -226,16 +237,13 @@ static void dshotBitbangDmaHandler(DMA_t descriptor)
         dshotBitbangCtx.outputCallbackCount++;
         dshotBitbangCtx.lastLatencyUs = micros() - dshotBitbangCtx.frameStartedUs;
 
-        if (dshotBitbangCtx.frameRequestsTelemetry) {
-            dshotBitbangCtx.telemetryFrameCount++;
-            dshotBitbangSwitchToInput();
-            dshotBitbangCtx.telemetryPending = true;
-            TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, ENABLE);
-        } else {
-            dshotBitbangCtx.outputOnlyFrameCount++;
-            dshotBitbangCtx.telemetryPending = false;
-            dshotBitbangCtx.state = DSHOT_BITBANG_STATE_OUTPUT;
-        }
+        // Every inverted-checksum frame permits an eRPM reply, including zero
+        // throttle and packets whose separate telemetry-request bit is clear.
+        dshotBitbangCtx.telemetryFrameCount++;
+        dshotBitbangSwitchToInput();
+        dshotBitbangCtx.telemetryPending = true;
+        dshotBitbangCtx.outputPending = false;
+        TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, ENABLE);
     } else if (dshotBitbangCtx.state == DSHOT_BITBANG_STATE_INPUT) {
         dshotBitbangCtx.inputCallbackCount++;
         dshotBitbangCtx.telemetryPending = false;
@@ -491,7 +499,8 @@ bool dshotBitbangRuntimeIsActive(void)
 
 bool dshotBitbangRuntimeIsReady(void)
 {
-    return dshotBitbangCtx.initialized && dshotBitbangCtx.configuredMotorCount == getMotorCount();
+    return dshotBitbangCtx.initialized && dshotBitbangCtx.configured &&
+        dshotBitbangCtx.configuredMotorCount == getMotorCount();
 }
 
 bool dshotBitbangRuntimeUpdate(void)
@@ -500,20 +509,46 @@ bool dshotBitbangRuntimeUpdate(void)
         return true;
     }
 
+    // A TX transfer also needs ownership and a deadline. Otherwise the main
+    // loop can rewrite its buffer/NDTR while DMA is still reading it.
+    if (dshotBitbangCtx.outputPending) {
+        if ((uint32_t)cmpTimeUs(micros(), dshotBitbangCtx.frameStartedUs) < DSHOT_BITBANG_TELEMETRY_TIMEOUT_US) {
+            return false;
+        }
+        ATOMIC_BLOCK(NVIC_PRIO_TIMER_DMA) {
+            TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, DISABLE);
+            DMA_Cmd(dshotBitbangCtx.dma->ref, DISABLE);
+            DMA_CLEAR_FLAG(dshotBitbangCtx.dma, DMA_IT_TCIF | DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_DMEIF | DMA_IT_FEIF);
+            dshotBitbangCtx.outputPending = false;
+            dshotBitbangCtx.telemetryPending = false;
+            dshotBitbangCtx.state = DSHOT_BITBANG_STATE_DISABLED;
+            dshotBitbangCtx.timeoutCount++;
+        }
+    }
+
     if (dshotBitbangCtx.telemetryPending) {
         if ((uint32_t)cmpTimeUs(micros(), dshotBitbangCtx.captureStartedUs) < DSHOT_BITBANG_TELEMETRY_TIMEOUT_US) {
             return false;
         }
 
-        dshotBitbangCtx.timeoutCount++;
+        ATOMIC_BLOCK(NVIC_PRIO_TIMER_DMA) {
+            TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, DISABLE);
+            DMA_Cmd(dshotBitbangCtx.dma->ref, DISABLE);
+            DMA_CLEAR_FLAG(dshotBitbangCtx.dma, DMA_IT_TCIF | DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_DMEIF | DMA_IT_FEIF);
+            dshotBitbangCtx.telemetryPending = false;
+            dshotBitbangCtx.state = DSHOT_BITBANG_STATE_DISABLED;
+            dshotBitbangCtx.timeoutCount++;
+        }
         dshotBitbangUpdateDebug(0, 0, 0, 1);
-        dshotBitbangCtx.telemetryPending = false;
-        DMA_Cmd(dshotBitbangCtx.dma->ref, DISABLE);
-        TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, DISABLE);
     }
 
     if (dshotBitbangCtx.state == DSHOT_BITBANG_STATE_INPUT) {
         dshotBitbangDecodeSamples();
+        dshotBitbangSwitchToOutput();
+    } else if (dshotBitbangCtx.state == DSHOT_BITBANG_STATE_DISABLED) {
+        for (uint8_t i = 0; i < DSHOT_BITBANG_MAX_MOTORS; i++) {
+            rpmSourceInvalidateDshotBidir(i);
+        }
         dshotBitbangSwitchToOutput();
     }
 
@@ -527,7 +562,6 @@ void dshotBitbangRuntimeBeginFrame(void)
     }
 
     dshotBitbangOutputDataClear(dshotBitbangCtx.outputBuffer);
-    dshotBitbangCtx.frameRequestsTelemetry = false;
 }
 
 void dshotBitbangRuntimeSetMotorValue(uint8_t motorIndex, uint16_t value, bool requestTelemetry)
@@ -538,12 +572,11 @@ void dshotBitbangRuntimeSetMotorValue(uint8_t motorIndex, uint16_t value, bool r
 
     const uint16_t packet = dshotBitbangPreparePacket(value, requestTelemetry);
     dshotBitbangOutputDataSet(dshotBitbangCtx.outputBuffer, dshotBitbangMotors[motorIndex].pinIndex, packet, true);
-    dshotBitbangCtx.frameRequestsTelemetry |= requestTelemetry;
 }
 
 void dshotBitbangRuntimeStartFrame(void)
 {
-    if (!dshotBitbangRuntimeIsReady()) {
+    if (!dshotBitbangRuntimeIsReady() || dshotBitbangCtx.outputPending || dshotBitbangCtx.telemetryPending) {
         return;
     }
 
@@ -553,6 +586,7 @@ void dshotBitbangRuntimeStartFrame(void)
 
     dshotBitbangCtx.frameStartedUs = micros();
     dshotBitbangCtx.telemetryPending = false;
+    dshotBitbangCtx.outputPending = true;
     DMA_CLEAR_FLAG(dshotBitbangCtx.dma, DMA_IT_TCIF | DMA_IT_TEIF | DMA_IT_DMEIF | DMA_IT_FEIF);
     DMA_SetCurrDataCounter(dshotBitbangCtx.dma->ref, DSHOT_BITBANG_OUTPUT_BUFFER_LENGTH);
     DMA_Cmd(dshotBitbangCtx.dma->ref, ENABLE);
