@@ -48,6 +48,7 @@ typedef struct {
 typedef struct {
     bool initialized;
     bool configured;
+    bool suspended;
     uint8_t configuredMotorCount;
     const timerHardware_t *pacerTimHw;
     TCH_t *pacerTch;
@@ -499,13 +500,40 @@ bool dshotBitbangRuntimeIsActive(void)
 
 bool dshotBitbangRuntimeIsReady(void)
 {
-    return dshotBitbangCtx.initialized && dshotBitbangCtx.configured &&
+    return dshotBitbangCtx.initialized && dshotBitbangCtx.configured && !dshotBitbangCtx.suspended &&
         dshotBitbangCtx.configuredMotorCount == getMotorCount();
+}
+
+void dshotBitbangRuntimeStop(void)
+{
+    if (!dshotBitbangCtx.initialized) {
+        return;
+    }
+    ATOMIC_BLOCK(NVIC_PRIO_TIMER_DMA) {
+        dshotBitbangCtx.suspended = true;
+        TIM_DMACmd(dshotBitbangCtx.pacerTimHw->tim, dshotBitbangCtx.dmaSource, DISABLE);
+        DMA_Cmd(dshotBitbangCtx.dma->ref, DISABLE);
+        DMA_CLEAR_FLAG(dshotBitbangCtx.dma, DMA_IT_TCIF | DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_DMEIF | DMA_IT_FEIF);
+        dshotBitbangCtx.outputPending = false;
+        dshotBitbangCtx.telemetryPending = false;
+        dshotBitbangCtx.state = DSHOT_BITBANG_STATE_DISABLED;
+        if (dshotBitbangCtx.gpio) {
+            MODIFY_REG(dshotBitbangCtx.gpio->MODER, dshotBitbangCtx.gpioModeMask, dshotBitbangCtx.gpioModeInput);
+        }
+    }
+    rpmSourceResetDshotBidir();
+}
+
+void dshotBitbangRuntimeResume(void)
+{
+    if (dshotBitbangCtx.initialized) {
+        dshotBitbangCtx.suspended = false;
+    }
 }
 
 bool dshotBitbangRuntimeUpdate(void)
 {
-    if (!dshotBitbangCtx.initialized) {
+    if (!dshotBitbangCtx.initialized || dshotBitbangCtx.suspended) {
         return true;
     }
 
@@ -728,6 +756,14 @@ bool dshotBitbangRuntimeIsActive(void)
 bool dshotBitbangRuntimeIsReady(void)
 {
     return false;
+}
+
+void dshotBitbangRuntimeStop(void)
+{
+}
+
+void dshotBitbangRuntimeResume(void)
+{
 }
 
 bool dshotBitbangRuntimeUpdate(void)

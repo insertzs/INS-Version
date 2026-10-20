@@ -226,6 +226,11 @@ void pwmWriteMotor(uint8_t index, uint16_t value)
 
 void pwmShutdownPulsesForAllMotors(uint8_t motorCount)
 {
+#ifdef USE_DSHOT_BIDIR
+    if (dshotBitbangModeActive) {
+        dshotBitbangRuntimeStop();
+    }
+#endif
     for (int index = 0; index < motorCount; index++) {
         // Set the compare register to 0, which stops the output pulsing if the timer overflows
         if (motors[index].pwmPort) {
@@ -237,11 +242,21 @@ void pwmShutdownPulsesForAllMotors(uint8_t motorCount)
 void pwmDisableMotors(void)
 {
     pwmMotorsEnabled = false;
+#ifdef USE_DSHOT_BIDIR
+    if (dshotBitbangModeActive) {
+        dshotBitbangRuntimeStop();
+    }
+#endif
 }
 
 void pwmEnableMotors(void)
 {
     pwmMotorsEnabled = true;
+#ifdef USE_DSHOT_BIDIR
+    if (dshotBitbangModeActive) {
+        dshotBitbangRuntimeResume();
+    }
+#endif
 }
 
 bool isMotorBrushed(uint16_t motorPwmRateHz)
@@ -714,6 +729,9 @@ void pwmCompleteMotorUpdate(void) {
         }
 
         if (dshotBitbangModeActive) {
+            if (!pwmMotorsEnabled || !dshotBitbangRuntimeIsReady()) {
+                return;
+            }
             if (!dshotBitbangHasActiveThrottle(motorCount)) {
 #ifdef USE_DSHOT_BIDIR
                 dshotBitbangIdleGateCount++;

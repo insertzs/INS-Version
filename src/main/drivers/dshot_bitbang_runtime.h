@@ -17,6 +17,8 @@ bool dshotBitbangRuntimeInit(uint32_t dshotSymbolHz);
 bool dshotBitbangRuntimeConfigureMotor(const timerHardware_t *timerHardware, uint8_t motorIndex, bool enableOutput);
 bool dshotBitbangRuntimeIsActive(void);
 bool dshotBitbangRuntimeIsReady(void);
+void dshotBitbangRuntimeStop(void);
+void dshotBitbangRuntimeResume(void);
 bool dshotBitbangRuntimeUpdate(void);
 void dshotBitbangRuntimeBeginFrame(void);
 void dshotBitbangRuntimeSetMotorValue(uint8_t motorIndex, uint16_t value, bool requestTelemetry);
