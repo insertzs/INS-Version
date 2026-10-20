@@ -100,8 +100,16 @@ typedef void (*dmaCallbackHandlerFuncPtr)(DMA_t channelDescriptor);
                                                                     dmaDescriptors[i].irqHandlerCallback(&dmaDescriptors[i]);\
                                                             }
 
-#define DMA_CLEAR_FLAG(d, flag) if (d->flagsShift > 31) d->dma->HIFCR = (flag << (d->flagsShift - 32)); else d->dma->LIFCR = (flag << d->flagsShift)
-#define DMA_GET_FLAG_STATUS(d, flag) (d->flagsShift > 31 ? d->dma->HISR & (flag << (d->flagsShift - 32)): d->dma->LISR & (flag << d->flagsShift))
+#define DMA_CLEAR_FLAG(d, flag) do { \
+    if ((d)->flagsShift > 31) { \
+        (d)->dma->HIFCR = ((flag) << ((d)->flagsShift - 32)); \
+    } else { \
+        (d)->dma->LIFCR = ((flag) << (d)->flagsShift); \
+    } \
+} while (0)
+#define DMA_GET_FLAG_STATUS(d, flag) ((d)->flagsShift > 31 ? \
+    ((d)->dma->HISR & ((flag) << ((d)->flagsShift - 32))) : \
+    ((d)->dma->LISR & ((flag) << (d)->flagsShift)))
 
 
 
